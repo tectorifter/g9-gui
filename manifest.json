@@ -1,0 +1,27 @@
+{
+  "id": "g9-gui",
+  "name": "modern UI & stats",
+  "version": "1.6.0",
+  "api": 2,
+  "entry": "main.lua",
+  "profile": "content",
+  "game_version": ">=0.1.45",
+  "games": [
+    "gen1"
+  ],
+  "category": "UI",
+  "priority": 100,
+  "permissions": [
+    "engine_internals"
+  ],
+  "dependencies": [],
+  "optional_dependencies": [
+    "g9-battle-engine",
+    "g9-battle-sprites"
+  ],
+  "description": "Full-screen modern menu suite for Gen 1 and Gen 2 (only gen 1 for now).",
+  "options_schema": "options.lua",
+  "experimental": false,
+  "conflicts": [],
+  "incompatible": []
+}
