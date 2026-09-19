@@ -24,10 +24,22 @@
 -- screenshot of the game's party screen.  Because Saira is proportional, no
 -- layout in this mod may count cells any more: measure with Theme.w /
 -- Theme.fit, which is what every screen now does.  The body is 22 (cap ink
--- 15px) and the secondary size is 13; the shipped TTFs are static instances of
+-- 15px), the secondary size is 13 and the caption size is 10 (`tiny`, the
+-- roster's "Lv" prefix); the shipped TTFs are static instances of
 -- upstream's variable font, so each carries one weight and no variation axes.
 -- Saira-SemiBold is the `bold` cut, used for the figures (levels, HP, money,
--- stats) the way the reference weights its numbers.
+-- stats) the way the reference weights its numbers.  A fourth rung, `box`
+-- (10), is the dialogue window's body -- see ui/textbox.lua -- with `boxSmall`
+-- (9) its emergency cut.  Since 2.3.4 that rung always draws, on every engine:
+-- the box paints its own Saira at the window's own size rather than handing the
+-- body back to the host engine's TTF.  The box body is the one rung re-flowed:
+-- the box wraps its text at the `box` font's own width, not the engine's 18
+-- tile cells, so it fits more of a message per line than the engine's
+-- pagination would -- and a smaller `box` fits more still.
+-- `box` is the one rung that is also built at a MULTIPLE of its size
+-- (Theme.fontsAt), because the dialogue card is rasterised in window space
+-- rather than in the 160x144 surface -- same type proportions, drawn at the
+-- window's own resolution instead of an upscaled bitmap.
 --
 -- Plain Pixel (the engine's own bundled pixel TTF) stays the fallback: if the
 -- two Saira files cannot be read, the exact same layout is built from it and
@@ -70,7 +82,20 @@ return function(mod)
   local FONT_REGULAR = "assets/fonts/Saira-Regular.ttf"
   local FONT_BOLD    = "assets/fonts/Saira-SemiBold.ttf"
   local FONT_PIXEL   = "assets/fonts/plainpixel/PlainPixel-Regular.ttf"
-  local BODY, SMALL = 22, 13
+  -- `DIALOG` is the dialogue-box rung.  The window is drawn out of the classic
+  -- 160x144 surface, where anything near `body` would not hold two lines; the
+  -- box keeps its own size rather than borrowing `body`.  It shipped at 11
+  -- through 2.2.0, was raised to 13 in 2.3.0 and settled at 12 in 2.3.1; 2.3.2
+  -- drops it to 10 -- a 7px cap, a touch under the flat cap of the vanilla 8px
+  -- tile glyph -- so more of a message fits the card.  That works because the
+  -- box body is the ONE rung re-flowed: ui/textbox.lua wraps its text at the
+  -- `box` font's own width rather than the engine's 18 tile cells, so a
+  -- smaller `box` genuinely packs more glyphs per line.  `BOX_SMALL` (9) is
+  -- the rung a page falls back to when a wide line still will not fit at 10.
+  -- 2.3.3 briefly handed the body back to the engine's own TTF; 2.3.4 undoes
+  -- that, so this rung -- and the re-flow -- always draw now, at the window's
+  -- own size on every engine.
+  local BODY, SMALL, TINY, DIALOG, BOX_SMALL = 22, 13, 10, 10, 9
   local ELLIPSIS = "\xe2\x80\xa6"
 
   -- Vertical metrics per file, in em: ascent (line top -> baseline), cap height
@@ -164,19 +189,57 @@ return function(mod)
   -- boot knows where the engine's own TTF lives.  A call with no game (the
   -- module-level helpers below default to `body`) builds an uncached set from
   -- the engine font so it can never poison the real one.
-  function Theme.fonts(game)
-    if fonts then return fonts end
+  --
+  -- `k` multiplies every size.  k == 1 is the set every screen draws with;
+  -- k == the renderer's window scale is what the dialogue card asks for when
+  -- it paints in window space (Theme.fontsAt).  A love Font rasterises its
+  -- glyphs at the size it was built with, so scaling a draw transform would
+  -- just resample the atlas -- the size has to be baked in.
+  local function buildSet(game, k, fallback)
     local def = game and game.data and game.data.font
     local engineFile = (def and def.ttf and def.ttf.file) or nil
+    local function sized(rel, size)
+      return fromMod(rel, size) or fromFile(engineFile, size)
+    end
+    local body = sized(FONT_REGULAR, BODY * k) or fallback
+    local small = sized(FONT_REGULAR, SMALL * k) or body
+    -- the caption cut (the roster's tiny "Lv"): same face, one size down from
+    -- `small` if the TTF cannot be opened there
+    local tiny = sized(FONT_REGULAR, TINY * k) or small
+    local bold = sized(FONT_BOLD, BODY * k) or body
+    local box = sized(FONT_REGULAR, DIALOG * k) or body
+    local boxSmall = sized(FONT_REGULAR, BOX_SMALL * k) or box
+    local smallBold = sized(FONT_BOLD, SMALL * k) or small
+    return { body = body, big = body, bold = bold, small = small,
+      tiny = tiny, box = box, boxSmall = boxSmall, smallBold = smallBold }
+  end
+
+  function Theme.fonts(game)
+    if fonts then return fonts end
     local okF, cur = pcall(love.graphics.getFont)
-    local fallback = (okF and cur) or nil
-    local body = fromMod(FONT_REGULAR, BODY) or fromFile(engineFile, BODY)
-      or fallback
-    local small = fromMod(FONT_REGULAR, SMALL) or fromFile(engineFile, SMALL)
-      or body
-    local bold = fromMod(FONT_BOLD, BODY) or body
-    local built = { body = body, big = body, bold = bold, small = small }
+    local built = buildSet(game, 1, (okF and cur) or nil)
     if game then fonts = built end
+    return built
+  end
+
+  -- The same faces at `k` times every size, for drawing in window space.  A
+  -- love Font object cannot be resized and building one per frame would leak,
+  -- so the last few scales are kept in a tiny ring: a window resize walks the
+  -- scale through a handful of values, not a continuum.
+  local scaled, scaledRing = {}, {}
+  function Theme.fontsAt(game, k)
+    if type(k) ~= "number" or k <= 0 or math.abs(k - 1) < 1e-6 then
+      return Theme.fonts(game)
+    end
+    local hit = scaled[k]
+    if hit then return hit end
+    local okF, cur = pcall(love.graphics.getFont)
+    local built = buildSet(game, k, (okF and cur) or nil)
+    scaled[k] = built
+    scaledRing[#scaledRing + 1] = k
+    while #scaledRing > 3 do
+      scaled[table.remove(scaledRing, 1)] = nil
+    end
     return built
   end
 
@@ -353,15 +416,18 @@ return function(mod)
   end
 
   -- Corner brackets, the embellishment that frames the whole surface.
-  function Theme.brackets(x, y, w, h, len, color)
+  -- sx/sy are the stroke thickness; 1 in the surface's own pixels, the
+  -- window scale when the same bracket is drawn natively (textbox.lua).
+  function Theme.brackets(x, y, w, h, len, color, sx, sy)
     Theme.set(color or COL.accentDim)
+    sx, sy = sx or 1, sy or 1
     local function L(px, py, bw, bh)
       rect("fill", px, py, bw, bh, 0)
     end
-    L(x, y, len, 1) L(x, y, 1, len)
-    L(x + w - len, y, len, 1) L(x + w - 1, y, 1, len)
-    L(x, y + h - 1, len, 1) L(x, y + h - len, 1, len)
-    L(x + w - len, y + h - 1, len, 1) L(x + w - 1, y + h - len, 1, len)
+    L(x, y, len, sy) L(x, y, sx, len)
+    L(x + w - len, y, len, sy) L(x + w - sx, y, sx, len)
+    L(x, y + h - sy, len, sy) L(x, y + h - len, sx, len)
+    L(x + w - len, y + h - sy, len, sy) L(x + w - sx, y + h - len, sx, len)
   end
 
   -- A compact heading: accent rule + label, used above roster columns and
@@ -373,6 +439,48 @@ return function(mod)
 
   -- Footer hint strip: a list of {key=, text=} chips, left to right.
   -- Returns the width used.
+  --
+  -- A key made of arrow characters is drawn as VECTOR arrows, not text: the
+  -- bundled face (Saira, and Plain Pixel before it) has no U+2190..U+2193, so
+  -- `key = "\xe2\x86\x90\xe2\x86\x92"` printed the engine's missing-glyph box
+  -- twice at the foot of every screen.  Reading the key as directions keeps
+  -- every existing hint list unchanged and puts a real chevron in the chip.
+  local ARROW_DIR = {
+    ["\xe2\x86\x90"] = "left", ["\xe2\x86\x91"] = "up",
+    ["\xe2\x86\x92"] = "right", ["\xe2\x86\x93"] = "down",
+  }
+  -- [] -> list of directions, or nil when the key is ordinary text
+  local function arrowKey(key)
+    local dirs, i, n = {}, 1, #key
+    while i <= n do
+      local dir = ARROW_DIR[key:sub(i, i + 2)]
+      if not dir then return nil end
+      dirs[#dirs + 1] = dir
+      i = i + 3
+    end
+    return #dirs > 0 and dirs or nil
+  end
+
+  -- One filled triangle, apex pointing `dir`.  `r` is the half-height.  Built
+  -- as six numbers rather than a vertex table: love.graphics.polygon takes
+  -- both, but the render harness's stand-in records the varargs form only.
+  local function arrowTri(dir, cx, cy, r, color)
+    Theme.set(color or COL.accent)
+    if dir == "left" then
+      love.graphics.polygon("fill", cx - r, cy, cx + r * 0.52, cy - r,
+        cx + r * 0.52, cy + r)
+    elseif dir == "right" then
+      love.graphics.polygon("fill", cx + r, cy, cx - r * 0.52, cy - r,
+        cx - r * 0.52, cy + r)
+    elseif dir == "up" then
+      love.graphics.polygon("fill", cx, cy - r, cx - r, cy + r * 0.52,
+        cx + r, cy + r * 0.52)
+    else
+      love.graphics.polygon("fill", cx, cy + r, cx - r, cy - r * 0.52,
+        cx + r, cy - r * 0.52)
+    end
+  end
+
   function Theme.hints(list, x, y, font, opts)
     opts = opts or {}
     font = font or Theme.fonts(nil).body
@@ -389,11 +497,26 @@ return function(mod)
     local txtCol = opts.textColor or COL.inkFaint
     for i = 1, #list do
       local h = list[i]
-      local kw = font:getWidth(h.key)
+      local dirs = arrowKey(tostring(h.key or ""))
+      local kw, arrowR, step
+      if dirs then
+        arrowR = math.max(3, cap * 0.50)
+        step = arrowR * 1.44
+        kw = #dirs * step
+      else
+        kw = font:getWidth(h.key)
+      end
       local cy = y - math.floor((chipH - cap) * 0.5)
       Theme.set(opts.keyBg or COL.accentDim)
       rect("fill", pen, cy, kw + inset * 2, chipH, radius)
-      Theme.text(h.key, pen + inset, y, font, "left", keyCol)
+      if dirs then
+        local ax = pen + inset
+        for k = 1, #dirs do
+          arrowTri(dirs[k], ax + step * (k - 0.5), y + cap * 0.5, arrowR, keyCol)
+        end
+      else
+        Theme.text(h.key, pen + inset, y, font, "left", keyCol)
+      end
       pen = pen + kw + inset * 2 + gap
       if h.text then
         pen = pen + Theme.text(h.text, pen, y, font, "left", txtCol)

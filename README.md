@@ -3,7 +3,9 @@
 A full-screen modern menu suite for **Gen 1** (Red / Blue / Yellow) on the
 gen1recomp engine. It replaces the START screen, the POKéMON screen, the
 POKéMON summary **and every page the START menu opens** (bag, Pokédex, Options,
-trainer card, mod manager) with one design drawn on a **540×360** UI surface.
+trainer card, mod manager) with one design drawn on a **540×360** UI surface,
+plus the START screen's SAVE/QUIT prompts, the boot **title menu** and the
+**LOAD REPORT**.
 
 Ships as a mod folder (`manifest.json` + `main.lua` + `ui/*.lua` +
 `assets/fonts/*.ttf`), id `g9-gui`, `games: ["gen1"]`. Gen 2 is untouched by
@@ -22,8 +24,15 @@ design (see *Scope*).
 | `PokedexMenu` | `ui/pokedex.lua` | POKéDEX: `num name`, an owned-ball marker, unseen entries dimmed, `SEEN n OWN n` in the header |
 | `DexEntryMenu` | `ui/dex_entry.lua` | A species page: portrait panel, `HEIGHT`/`WEIGHT` figures, the re-wrapped description (paged) |
 | `OptionsMenu` | `ui/options.lua` | OPTION and its group sub-pages: label + value rows, a synthetic `BACK` row |
-| `TrainerCard` | `ui/trainer_card.lua` | The player card: portrait panel, NAME/MONEY/TIME figures and eight numbered badge pips |
+| `TrainerCard` | `ui/trainer_card.lua` | The player card: portrait panel, NAME/MONEY/TIME figures and eight badge slots drawn from the game's own badge tiles |
 | `ManagerState` | `ui/manager.lua` | MODS: a MODS/PROFILES/ERRORS tab strip over the manager's own rows, plus its options and confirm/notice overlay |
+| `TitleState` | `ui/title.lua` | The boot title screen keeps its logo/cinematic; its own `CONTINUE / NEW GAME / OPTION / EXIT GAME` menu and the `CONTINUE` save-data window become this mod's rail + SAVE DATA emblem |
+| `QuarantineReport` | `ui/load_report.lua` | LOAD REPORT: the one-shot validation digest, as a sectioned scrollable page |
+
+The START screen's **SAVE** and **QUIT** rows open this mod's own modals
+(`ui/dialogs.lua`) instead of the classic `TextBox` + `ChoiceBox`: a save-data
+card, a YES/NO confirmation and an auto-advancing notice, so the save prompt is
+the same page as the menu that opened it.
 
 Every one of those is a **view takeover**: the engine's own object stays on the
 stack and keeps its navigation, and only the page is redrawn at 540×360, so
@@ -55,12 +64,16 @@ Layout of the page:
 The roster row (the heart of the design) is, left to right: the selection band
 with a modernised **double chevron** (alone — no accent bar beside it, and
 centred in the row), a **56×34 portrait card**, the mon's name **beside** the
-card (never printed over it), the level in gold, `hp/max`, a colour-coded HP
-gauge under them and an EXP bar in the right-hand column. A status flag is a
-small chip in the card's top-right corner (`FNT`, `PSN`, …); a fainted mon's
-row is washed dark. There is no column-heading row: at the 22px body a heading
-would push the sixth slot past the footer rule, and the gold level / `30/38`
-figures read without titles.
+card (never printed over it), `hp/max` right-aligned in the column next to the
+name, then the level — gold and SemiBold, at the row's right edge, with a
+**small `Lv`** sat on the digits' baseline ahead of them — a colour-coded HP
+gauge under them and an EXP bar in the right-hand column. The name is cut to
+the pixels the HP figures actually leave (`210/210` is much wider than
+`63/63`), so a long name stops short of them instead of running underneath. A
+status flag is a small chip in the card's top-right corner (`FNT`, `PSN`, …); a
+fainted mon's row is washed dark. There is no column-heading row: at the 22px
+body a heading would push the sixth slot past the footer rule, and the `30/38`
+/ `Lv 63` figures read without titles.
 
 The player's wallet is **not** a column: it is one `MONEY: 2244` readout on the
 header's second line, directly under the `BADGES … DEX …` readout.
@@ -88,7 +101,7 @@ left half-drawn underneath.
 | `modern_ui` | ON | Master switch. OFF installs nothing at all — every screen is left exactly as the engine drew it |
 | `ui_background` | ON | ON: the layered backdrop (gradient, glows, vignette, weave). OFF: a flat dark field |
 | `ui_embellishment` | ON | ON: corner brackets, rules, header emblem, pulsing chevrons. OFF: the same layout, undecorated |
-| `ui_portraits` | `sprites` | `sprites`: the head area of the pack's **front battle sheet** (`assets/front/<STEM>.png`), filling the card. `icons`: the pack's **16×16 party-icon atlas** (`assets/icons/party_icons.png`) fitted into the same card |
+| `ui_portraits` | `sprites` | `sprites`: the head space of the pack's **front battle sheet** (`assets/front/<STEM>.png`), at the pack's own 1:1 pixels. `icons`: the pack's **16×16 party-icon atlas** (`assets/icons/party_icons.png`) fitted into the same card |
 
 Choice rows carry their value as a **string** (`"true"` / `"false"` /
 `"sprites"` / `"icons"`); every read in the mod compares against a string and a
@@ -102,8 +115,9 @@ missing row reads as ON.
 manifest.json       id/name/version, games=["gen1"], priority 100,
                     optional_dependencies=[g9-battle-engine, g9-battle-sprites],
                     options_schema
-main.lua            entry chunk: helper esc()/loadSibling(), option reads,
-                    Gen 1 gate, sibling loading, screen registration
+main.lua            entry chunk: helpers esc()/loadSibling()/attempt()
+                    (per-piece failure isolation), option reads, Gen 1 gate,
+                    sibling loading, screen registration
 options.lua         the Mod Manager option schema (shared with the manifest)
 ui/theme.lua        palette, Saira font factory (mod TTF -> FileData, Plain
                     Pixel fallback), METRIC/ink-offset metrics, Theme.fit,
@@ -124,8 +138,18 @@ ui/bag.lua          BagMenu view takeover (ITEM)
 ui/pokedex.lua      PokedexMenu view takeover (POKéDEX)
 ui/dex_entry.lua    DexEntryMenu view takeover (a species' dex entry page)
 ui/options.lua      OptionsMenu view takeover (OPTION and its group pages)
-ui/trainer_card.lua TrainerCard view takeover (the player-name row)
-ui/manager.lua      ManagerState view takeover (MODS)
+ui/trainer_card.lua TrainerCard view takeover (the player-name row: portrait,
+                    figures, and the badge row drawn from the engine's own
+                    trainer_card/badges.png tiles -- earned ones in colour
+                    behind a gold ring, unearned ones ghosted)
+ui/manager.lua      ManagerState view takeover (MODS); its ERRORS tab and a
+                    mod's own errors page carry an EXPORT LOG row that writes
+                    the whole error log to a .txt (see *Error log export*)
+ui/dialogs.lua      the shared modals: the save-data card (also the title's
+                    CONTINUE window), the YES/NO confirmation and the
+                    auto-advancing notice the SAVE flow uses
+ui/title.lua        TitleState view takeover (the boot menu + CONTINUE window)
+ui/load_report.lua  QuarantineReport view takeover (LOAD REPORT)
 assets/fonts/Saira-Regular.ttf    body copy (SIL OFL 1.1)
 assets/fonts/Saira-SemiBold.ttf   titles, levels, stat values
 assets/fonts/OFL.txt              Saira's licence - must ship beside the TTFs
@@ -162,6 +186,62 @@ sub-page factory, so `OPTION`'s nested pages get the modern page too),
 `ui/trainer_card.lua`, `ui/manager.lua` and `ui/dex_entry.lua` (the page
 POKéDEX opens on a species) each wrap their engine object's `draw`/surface and
 keep its `update`.
+
+### Failure isolation
+
+The mod loader journals every registration a chunk makes and **rolls the whole
+journal back if the chunk throws**, so a single bad sibling file used to take
+the entire suite down — every screen silently reverting to the classic UI with
+one log line to explain it. `main.lua` therefore builds each piece inside
+`attempt(label, fn, ...)` (a `pcall` that logs `g9-gui: <label> failed: <err>`
+and returns `nil`) and installs each screen through it:
+
+* `options.lua` failing leaves the mod enabled with default options.
+* A shared `ui/*.lua` module (theme, backdrop, shell, portraits, roster) that
+  does not load or initialise stops the mod cleanly with a log line rather than
+  half-installing.
+* `ui/dialogs.lua` failing leaves the screens installed and SAVE/QUIT on the
+  engine's classic prompts (`title.lua` also keeps the engine's own
+  `ContinueInfo` window in that case).
+* Any single screen factory (`ui/start_menu.lua`, `ui/title.lua`, …) failing is
+  skipped by itself, so the builtin screen stays for that id and every other
+  screen still installs.
+
+The boot `info` line always reports what installed and ends
+`(modals on, background …, embellishments …, portraits …, modern stats …)` or
+`(modals CLASSIC, …)`, so a failure is visible in START → MODS without a crash.
+`ui/dialogs.lua`'s `harden(s)` wraps each modal's `draw`/`update` in a `pcall`
+too: a draw that throws logs once and steps the modal aside, so the page
+beneath returns instead of leaving a blank frame.
+
+### Error log export
+
+The manager's ERRORS tab (and a mod's own errors page, reached from its detail
+screen) carries an **EXPORT LOG** row ahead of the engine's error lines. It
+writes the **whole** log — every `status.errors` entry verbatim, then every mod
+whose `state` is not `loaded` with its `error`/`note`, plus a header naming the
+game/engine versions and the counts — to **`g9-gui-error-log.txt`**. It matters
+because the manager's own page can only show a handful of 16-character-wrapped
+lines at once, so a long boot log is unreadable there.
+
+Two engine constraints shape how it writes:
+
+* a mod chunk cannot name a file at all — `love.filesystem` is blocked by the
+  loader's sandbox, and `io`/`package` are absent;
+* `mod.storage` can only produce `.lua` (a serialized data table) or `.bin`
+  (opaque bytes) files, under keys restricted to letters/digits/`_`/`-`
+  segments — **no dots**, so it cannot make a `.txt`.
+
+The write therefore goes through `src.import.CacheFs`, an **engine** module
+required from the sandboxed chunk: the require is allowed (only `io`, `os`,
+`debug`, `package`, `ffi` and `love.*` are denied) and the module runs in the
+engine's own environment, where `love`/`io` are the real ones. `CacheFs.write`
+routes to the OS save directory, or to the game folder itself in a portable
+install, and creates parent directories as needed. The action `pcall`s the whole
+write and rides the manager's own notice slot — `SAVED g9-gui-error-log.txt` on
+success, `EXPORT FAILED` otherwise. The row is injected by wrapping
+`rowsForScreen` (a fresh copy, never mutating the base list) so the cursor,
+`focusedRow` and `activate()` all see it.
 
 ### The 540×360 surface
 
@@ -250,7 +330,10 @@ The Zodiac Age** party-screen face. The real FFXII font is a commercial
 typeface and cannot be redistributed, so this mod ships its own: Saira is a
 humanist sans with the same low-stress, slightly squared bowls, a tall x-height
 and narrow-ish caps, and at 22 px it reads as the same kind of type without
-being a copy. The two TTFs (plus SIL OFL 1.1) live in `assets/fonts/` and ship
+being a copy. The scale is one body size (22), one secondary size (13) and one
+caption size (10 — the roster's `Lv`), exposed by `Theme.fonts` as
+`body`/`bold`/`small`/`tiny`. The two TTFs (plus SIL OFL 1.1) live in
+`assets/fonts/` and ship
 with the mod — `assets/fonts/OFL.txt` **must** stay beside them, since Saira is
 licensed under the SIL Open Font License 1.1. If the faces cannot be loaded the
 mod falls back to the engine's own Plain Pixel, so the design still opens.
@@ -308,26 +391,33 @@ the pack's art even with BATTLE SPRITES off):
 | `sprites` | the pack's front battle sheet `assets/front/<STEM>.png`, baked to a trimmed frame | `frontArt(mon)` → `(image, w, h)` |
 | `icons` | the pack's 16×16 party-icon atlas `assets/icons/party_icons.png` | `iconArt16(mon)` → `(quads, image, cell)` |
 
-* `sprites` mode takes a window of the trimmed front frame that keeps the
-  card's own aspect (56×34 → a 28×17 window) from the **top of the frame** —
-  a trimmed frame IS its own content, so the top row is the top of the creature
-  — and draws it at a whole multiple (`ceil(w / frameW)`, so a narrow frame
-  still reaches the card's edges) with `love.graphics.setScissor`. The bake is
-  asynchronous (that mod's `core.update` budget), so the first call answers
-  `nil, pending` and the next frame gets the art. `pending` is kept through the
-  call, so those frames leave the card to the pack art rather than flashing the
-  engine's own pic; the engine fallback only covers a species the pack has no
-  sheet for (which answers `nil` with no `pending`).
+* `sprites` mode draws the **head space** of the trimmed front frame: the
+  card's own window of it (a 56×34 card → 56×34 frame pixels), **anchored to
+  the creature** and drawn at the pack's **own pixels, 1:1**. The export trims
+  to the whole animation's union box, so frame 1 can sit inside that box with
+  spare rows above its head; `contentBox` reads the frame's pixels back
+  (`Image:newImageData` → `getPixel`, cached) to find frame 1's own opaque box
+  and anchors the window to its top, centred across it. A frame narrower or
+  shorter than the card is centred in it at its own size. **Nothing is ever
+  zoomed**: the sheets are trimmed per species, so 1:1 is what keeps their
+  relative sizes reading true (a Weedle stays a Weedle beside an Amoonguss) —
+  the same natural size the battle screen draws — and the old per-frame whole
+  multiple (`ceil(w / frameW)`) was what blew the *smallest* sheets up hardest.
+  The bake is asynchronous (that mod's `core.update` budget), so the first call
+  answers `nil, pending` and the next frame gets the art. `pending` is kept
+  through the call, so those frames leave the card to the pack art rather than
+  flashing the engine's own pic; the engine fallback only covers a species the
+  pack has no sheet for (which answers `nil` with no `pending`).
 * `icons` mode fits the whole 16×16 atlas cell into the card at the largest
   whole multiple that fits.
 * **older copies of the sprites mod** (no `frontArt` / `iconArt16`) still work:
   the module falls back to `iconArtHD(mon)` — the pack's **true-colour,
   high-resolution 64×64 frames** (`assets/icons/party_icons_hd.png`, bundled
-  with that mod) — cropped for `sprites` mode and fitted for `icons` mode.
-  `iconArtHD` answers `(quads, image, cellPixels, box)`; `box` is the
-  `{x, y, w, h}` bounding box of the frame's opaque pixels, and the crop
-  anchors **2px above `box.y`** because those frames are bottom-anchored with
-  spare transparent rows above the creature.
+  with that mod) — cropped for `sprites` mode (the same 1:1 head window) and
+  fitted for `icons` mode. `iconArtHD` answers `(quads, image, cellPixels,
+  box)`; `box` is the `{x, y, w, h}` bounding box of the frame's opaque pixels,
+  and the crop anchors to `box.y` for the same reason the front frame needs
+  `contentBox`.
 * **engine fallback** — `sprites` mode draws the front pic at a whole multiple
   anchored to its TOP (the head-and-shoulders reading); `icons` mode draws the
   engine's 16×16 icon frame at the largest whole multiple that fits. Both come
@@ -373,8 +463,9 @@ mismatched atlas can never spill into the next column.
   checks `GameVersion.generation(GameVersion.get())` at boot.
 * The **START menu tree** is modernised: START, POKéMON, the summary, the bag
   (ITEM), the Pokédex and its species entry pages, OPTION and its group pages,
-  the trainer card and the mod manager. Still drawn by the engine: the battle
-  HUD, the text boxes, and the lists that are not opened from the START menu
-  (shops, the PC, the Pokédex CONTENTS menu).
+  the trainer card and the mod manager — plus the SAVE/QUIT modals, the boot
+  title menu with its CONTINUE window, and the LOAD REPORT. Still drawn by the
+  engine: the battle HUD, the text boxes, and the lists that are not opened
+  from the START menu (shops, the PC, the Pokédex CONTENTS menu).
 * A classic non-opaque overlay (a TextBox) draws high on the tall page — see
   *Known limit*.

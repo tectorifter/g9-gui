@@ -2,9 +2,10 @@
 --
 -- Two presentations, picked by the PARTY PORTRAITS option:
 --   "sprites" -- the head space of the pack's FRONT battle sheet for the
---                species (assets/front/<STEM>.png), a window keeping the
---                card's own aspect taken from the top of the trimmed frame and
---                drawn at a whole multiple so the face fills the card.
+--                species (assets/front/<STEM>.png): the card's own window of
+--                the frame, anchored to the creature's head, drawn at the
+--                pack's own pixels (1:1) so every species keeps the size the
+--                pack gives it.  See drawHeadSpace.
 --   "icons"   -- the pack's own 16x16 party-ICON atlas
 --                (assets/icons/party_icons.png), the whole cell fitted into
 --                the card.
@@ -30,16 +31,15 @@ return function(mod)
   local Assets = require("src.render.Assets")
   local Sprites = require("src.pokemon.Sprites")
 
-  -- Where in the pack's frame the "head space" window starts: 8% down, which
-  -- keeps a horn or a hat inside it.  The window's HEIGHT follows the card's
-  -- own aspect (see drawHeadSpace), so there is no second constant here.
+  -- The "head space" window is the card's own 56x34 of the frame, drawn at the
+  -- pack's OWN pixels -- 1:1, never a zoom (see drawHeadSpace).  HEAD_TOP is
+  -- only the fallback for a frame whose creature box cannot be read: 8% down,
+  -- which keeps a horn or a hat inside the window.
   local HEAD_TOP = 0.08
-  -- the largest whole multiple a card is ever filled with (6 keeps a very
-  -- narrow trimmed frame -- a slim snake-like sprite -- filling a 96px card)
-  local MAX_SCALE = 6
 
   local images = {}
   local quads = {}
+  local boxes = {}
 
   local function load(path)
     if not path then return nil end
@@ -62,16 +62,90 @@ return function(mod)
     return q
   end
 
+  -- LÖVE hands back a Quad as USERDATA, but the test harness's stand-in is a
+  -- plain table -- so a quad arriving from another mod is recognised by SHAPE
+  -- (something that answers getViewport), never by its Lua type.  The sprites
+  -- mod hands its cells over wrapped in a per-cell table
+  -- ({ full = quad, tl = ..., tr = ..., br = ... }); quadOf pulls the `full`
+  -- Quad out.  The wrapper MUST come off: a guard that only checked
+  -- `type(q.full) == "table"` left the wrapper TABLE in place on a real boot
+  -- (the Quad inside it is userdata), and love.graphics.draw then read that
+  -- table as the x coordinate -- "bad argument #2 to 'draw' (number expected,
+  -- got table)".  The Gen 2 portrait path always resolves through the icon
+  -- export, so that was the Gen 2 START crash.
+  local function isQuad(q)
+    if type(q) ~= "table" and type(q) ~= "userdata" then return false end
+    return type(q.getViewport) == "function"
+  end
+
+  local function quadOf(q)
+    if type(q) == "table" and isQuad(q.full) then return q.full end
+    return q
+  end
+
   -- forget cached art when the engine flushes its asset caches (dev hot
   -- reload, or a mod's sprite swap landing)
-  Assets.register(function() images = {} quads = {} end)
+  Assets.register(function() images = {} quads = {} boxes = {} end)
+
+  -- The opaque-pixel box of a frame Image, in the image's own pixels, or nil.
+  -- The sprites mod hands over the FIRST frame trimmed to the WHOLE
+  -- animation's union box, so that frame can sit inside it with spare rows
+  -- above its head (and spare columns beside it) -- anchoring the crop to the
+  -- image's own top would leave that gap under the card's top edge, and a
+  -- fixed left/right centre would frame the animation's travel instead of the
+  -- creature.  Reading the pixels back is what lets the crop anchor to the
+  -- CREATURE: `Image:newImageData` + `getPixel` (the same read the sprites mod
+  -- itself uses to measure its cells), scanned once per image -- a frame is at
+  -- most ~75px a side -- and cached beside the art.  nil when the pixels
+  -- cannot be read, and the caller falls back to the frame's own top.
+  local function contentBox(img)
+    local hit = boxes[img]
+    if hit == nil then
+      local ok, box = pcall(function()
+        local id = img:newImageData()
+        if not (id and id.getPixel) then return nil end
+        local iw, ih = img:getDimensions()
+        local x0, y0, x1, y1 = iw, ih, -1, -1
+        for y = 0, ih - 1 do
+          for x = 0, iw - 1 do
+            local a = select(4, id:getPixel(x, y))
+            if a and a > 0 then
+              if x < x0 then x0 = x end
+              if x > x1 then x1 = x end
+              if y < y0 then y0 = y end
+              if y > y1 then y1 = y end
+            end
+          end
+        end
+        if x1 < x0 or y1 < y0 then return nil end
+        return { x = x0, y = y0, w = x1 - x0 + 1, h = y1 - y0 + 1 }
+      end)
+      hit = (ok and box) or false
+      boxes[img] = hit
+    end
+    return hit or nil
+  end
 
   -- the icon entry is the same resolution PartyMenu.drawIcon performs:
   -- per-species override, then the species record's own `icon`, then the
   -- dex-indexed default table.
   local function iconSpec(game, mon)
-    local icons = game.data.icons
-    local def = game.data.pokemon and game.data.pokemon[mon.species]
+    local data = game.data or {}
+    local def = data.pokemon and data.pokemon[mon.species]
+    -- Gold keeps its icons at data.gen2Icons with the SAME shape
+    -- PartyMenu.iconFor reads: species[species] -> iconId, icons[iconId].image
+    -- (and the same src.pokemon.Sprites.iconPath seam on the way out).
+    local g2 = data.gen2Icons
+    if g2 then
+      local name = g2.species and g2.species[mon.species]
+      if not name and def then name = def.icon end
+      local entry = name and g2.icons and g2.icons[name]
+      local path = type(entry) == "table" and entry.image
+        or (type(entry) == "string" and entry) or nil
+      path = Sprites.iconPath(data, mon, path, { name = name })
+      return name, path
+    end
+    local icons = data.icons
     local entry = icons and icons.bySpecies and icons.bySpecies[mon.species]
     if not entry and def then entry = def.icon end
     local name, path
@@ -146,9 +220,9 @@ return function(mod)
     local ok, q, img, cell, box = pcall(fn, mon)
     if not ok then return nil end
     -- the current export hands back the per-cell quad table; take its frame
-    if type(q) == "table" and type(q.full) == "table" then q = q.full end
+    q = quadOf(q)
     if not (img and type(img.getDimensions) == "function"
-      and type(q) == "table") then return nil end
+      and isQuad(q)) then return nil end
     -- the cell size is the quad's own viewport (a 64x64 frame of a much wider
     -- atlas), so a sub-crop of it can be taken without guessing
     local cw, ch = 0, 0
@@ -170,7 +244,10 @@ return function(mod)
   -- The pack's FRONT battle art for this mon, through g9-battle-sprites'
   -- always-on `frontArt` export: the pack's own assets/front/<STEM>.png sheet,
   -- baked (off the draw path, by that mod's core.update hook) into a trimmed,
-  -- standalone frame Image.  Answers (image, w, h) once it is ready -- the
+  -- standalone frame Image.  The trim is the WHOLE animation's union box, so
+  -- the image can carry spare rows above frame 1's head -- which is why the
+  -- caller reads the frame's own pixels back (see contentBox) instead of
+  -- trusting the image's top.  Answers (image, w, h) once it is ready -- the
   -- first call starts the bake and answers `nil, pending` -- and nil, or a copy
   -- of the mod without the export, falls through to the HD icon cell below.
   -- `pending` says a real sheet is ON ITS WAY, so the caller must not fall back
@@ -204,9 +281,9 @@ return function(mod)
     if type(fn) ~= "function" then return nil end
     local ok, q, img, cell = pcall(fn, mon)
     if not ok then return nil end
-    if type(q) == "table" and type(q.full) == "table" then q = q.full end
+    q = quadOf(q)
     if not (img and type(img.getDimensions) == "function"
-      and type(q) == "table") then return nil end
+      and isQuad(q)) then return nil end
     local cw, ch = 0, 0
     if type(q.getViewport) == "function" then
       local ok2, _, _, qw, qh = pcall(q.getViewport, q)
@@ -220,38 +297,56 @@ return function(mod)
     return img, q, cw, ch
   end
 
-  -- Fill the card with the HEAD SPACE of the frame: a window of it, anchored
-  -- to the CREATURE (see the pack's opaque-pixel box, `box` -- the frames are
-  -- bottom-anchored and the spare rows sit above the art, so a fixed
-  -- top-anchored window would land on blank rows for many species) and centred
-  -- across it, drawn at the largest WHOLE multiple of the art's own pixels that
-  -- fits the card's WIDTH -- the card is a wide band, so the width is the axis
-  -- that decides it, and a whole multiple means the pack's 64x64 frames land on
-  -- exact 2x2 blocks instead of being resampled.  The window keeps the card's
-  -- aspect, so the art reaches all four edges.  Without a box (an older sprites
-  -- mod, or unreadable pixels) it falls back to the old 8%-down anchor.
+  -- Draw the HEAD SPACE of a frame into the card: the card's own window of the
+  -- image, anchored to the CREATURE (its opaque-pixel box, `box`) -- the head
+  -- at the card's top edge, centred across the creature -- and drawn at the
+  -- pack's OWN pixels, 1:1.
+  --
+  -- 1:1 is the whole point.  The pack's sheets are trimmed per species, so a
+  -- species' sheet size IS its size in the pack: drawing every sheet at the
+  -- same 1:1 is what keeps their relative sizes reading true -- a Weedle stays
+  -- a Weedle beside an Amoonguss -- and it is the same "natural size" the
+  -- battle screen draws.  It is also the one scale that resamples nothing at
+  -- all.  The old rule picked a WHOLE MULTIPLE per frame (ceil(w / frameW), so
+  -- that a narrow frame still reached the card's edges) which made exactly the
+  -- SMALLEST sheets the most zoomed -- a 37px sheet came out at 2x while a 62px
+  -- one stayed 1:1 -- so the portrait looked most wrong for the smallest
+  -- Pokemon.  A frame narrower or shorter than the card is simply centred in
+  -- it, at its own size.
+  --
+  -- `box` is the CREATURE's box; without one (unreadable pixels) the window
+  -- falls back to the frame's own top, HEAD_TOP down, centred on the frame.
   local function drawHeadSpace(img, q, aw, ah, x, y, w, h, box)
-    -- CEIL, not the nearest multiple: the window is clamped to the frame's own
-    -- width, so the scale must be the smallest whole multiple that makes the
-    -- art at least as wide as the card -- otherwise a frame narrower than the
-    -- card (a trimmed front sheet, unlike the 64px icon cell) would be drawn
-    -- too small to reach the card's edges.
-    local s = math.ceil(w / aw)
-    if s < 1 then s = 1 elseif s > MAX_SCALE then s = MAX_SCALE end
-    local winW = math.min(aw, math.max(1, math.ceil(w / s)))
-    local winH = math.min(ah, math.max(1, math.ceil(h / s)))
-    local winX = math.floor((aw - winW) * 0.5)
-    local winY
+    -- the card's window of the frame, in the frame's own pixels (1:1), and
+    -- never more of it than the frame has
+    local winW = math.min(aw, w)
+    local winH = math.min(ah, h)
+    local winX, winY
     if box then
-      -- a couple of pixels above the topmost opaque row, so the window starts
-      -- just over the head rather than clipping it
-      winY = math.max(0, math.floor(box.y) - 2)
+      winX = math.floor(box.x + box.w * 0.5 - winW * 0.5)
+      winY = math.floor(box.y)
+      if winY < 0 then winY = 0 end
+      -- the window's first row is the creature's head, so it must not run past
+      -- the frame's last row: SHRINK it (the head stays on the first row)
+      -- rather than pushing the head down, which would leave a blank strip
+      -- above it -- the very thing this crop exists to avoid.  A shorter
+      -- window is top-anchored at the draw below, so the head is flush.
+      if winY + winH > ah then winH = ah - winY end
+      local maxX = aw - winW
+      if winX > maxX then winX = maxX end
+      if winX < 0 then winX = 0 end
     else
+      winX = math.floor((aw - winW) * 0.5)
       winY = math.floor(ah * HEAD_TOP)
+      -- keep the fallback window inside the frame
+      local maxX, maxY = aw - winW, ah - winH
+      if winX > maxX then winX = maxX end
+      if winY > maxY then winY = maxY end
+      if winX < 0 then winX = 0 end
+      if winY < 0 then winY = 0 end
     end
-    if winY + winH > ah then winY = ah - winH end
-    if winY < 0 then winY = 0 end
-    -- a sub-quad of the cell, so the crop costs no extra atlas work
+    if winW <= 0 or winH <= 0 then return end
+    -- a sub-quad of the frame, so the crop costs no extra atlas work
     if winX > 0 or winY > 0 or winW < aw or winH < ah then
       local iw, ih = img:getDimensions()
       if q and q.getViewport then
@@ -265,9 +360,12 @@ return function(mod)
         q = quad(winX, winY, winW, winH, iw, ih)
       end
     end
-    local dw, dh = winW * s, winH * s
-    love.graphics.draw(img, q, math.floor(x + (w - dw) * 0.5),
-      math.floor(y + (h - dh) * 0.5), 0, s, s)
+    -- 1:1 into the card's own surface.  A box-anchored window keeps its first
+    -- row (the creature's head) on the card's first row, so the head is flush
+    -- even when the frame is shorter than the card; without a box the window is
+    -- centred on whichever axis the frame does not fill.
+    local dy = box and y or math.floor(y + (h - winH) * 0.5)
+    love.graphics.draw(img, q, math.floor(x + (w - winW) * 0.5), dy)
   end
 
   -- The whole frame, for the ICON presentation: fitted into the card, snapped
@@ -283,10 +381,45 @@ return function(mod)
       math.floor(y + (h - dh) * 0.5), 0, s, s)
   end
 
+  -- Clip the card's own art to the card rect.  love.graphics.setScissor works
+  -- in WINDOW pixels and is NOT affected by the current transform ("The
+  -- dimensions of the scissor are unaffected by graphical transformations" --
+  -- love.graphics.setScissor).  Gen 1 draws this 540x360 page into a real
+  -- surface at 1:1, so a page-space rect IS the window rect there.  Gen 2
+  -- paints the page into the window under Shell.gen2Page's translate/scale, so
+  -- a raw page-space setScissor clips a rectangle that no longer lines up with
+  -- the art -- at 2x it lands a whole card away and the portrait is clipped to
+  -- nothing (the "blank head space" bug).  Theme.page carries the active page
+  -- transform while the page draws (Shell.gen2Page), so map page -> window when
+  -- one is in play and use the plain rect otherwise.  nil = Gen 1.
+  local function clip(Theme, x, y, w, h)
+    local G = love.graphics
+    local p = Theme and Theme.page
+    if p then
+      local x0 = math.floor(p.ox + x * p.scale)
+      local y0 = math.floor(p.oy + y * p.scale)
+      local x1 = math.ceil(p.ox + (x + w) * p.scale)
+      local y1 = math.ceil(p.oy + (y + h) * p.scale)
+      G.setScissor(x0, y0, x1 - x0, y1 - y0)
+    else
+      G.setScissor(x, y, w, h)
+    end
+  end
+
+  local function unclip() love.graphics.setScissor() end
+
   -- Draw into the card body (x,y,w,h).  `Theme` is the shared theme, used for
   -- the no-art placeholder.  Returns true when art was drawn.
   function P.draw(Theme, game, mon, x, y, w, h, mode)
     local icons = (mode == "icons")
+    -- Gold has no Gen 1 front-pic table for src.pokemon.Sprites.path to read
+    -- (it keys off def.spriteFront) and the g9-battle-sprites pack is a Gen 1
+    -- mod, so on a Gold boot BOTH presentation modes resolve through the
+    -- engine's own party ICON -- an honest picture in the card rather than a
+    -- '?' under the chosen mode.
+    if not icons and game and game.data and game.data.gen2Icons then
+      icons = true
+    end
     -- set when the pack's front sheet for this mon is still baking, so the
     -- game's own art is NOT flashed on the frame before the pack art lands
     local pending = false
@@ -298,9 +431,9 @@ return function(mod)
       local img, q, cw, ch = packIcon(mon)
       if img then
         Theme.set(Theme.col.white)
-        love.graphics.setScissor(x, y, w, h)
+        clip(Theme, x, y, w, h)
         drawWhole(img, q, cw, ch, x, y, w, h)
-        love.graphics.setScissor()
+        unclip()
         return true
       end
     else
@@ -308,13 +441,17 @@ return function(mod)
       pending = wait or false
       if img then
         Theme.set(Theme.col.white)
-        love.graphics.setScissor(x, y, w, h)
-        -- a trimmed front frame IS its own content, so the head-space window
-        -- anchors to the frame's top (a full-frame box means "no spare rows")
+        clip(Theme, x, y, w, h)
+        -- the export trims to the WHOLE animation's union box, so frame 1 can
+        -- sit inside it with spare rows above its head (and spare columns
+        -- beside it): read frame 1's OWN box back and anchor the crop to the
+        -- creature.  A frame whose pixels cannot be read is taken as its own
+        -- content, so the window anchors to its top exactly as a truly trimmed
+        -- frame would.
+        local box = contentBox(img) or { x = 0, y = 0, w = aw, h = ah }
         local q = quad(0, 0, aw, ah, aw, ah)
-        drawHeadSpace(img, q, aw, ah, x, y, w, h,
-          { x = 0, y = 0, w = aw, h = ah })
-        love.graphics.setScissor()
+        drawHeadSpace(img, q, aw, ah, x, y, w, h, box)
+        unclip()
         return true
       end
     end
@@ -324,7 +461,7 @@ return function(mod)
     local img, q, aw, ah, box = packArt(mon)
     if img then
       Theme.set(Theme.col.white)
-      love.graphics.setScissor(x, y, w, h)
+      clip(Theme, x, y, w, h)
       if icons then
         -- the whole frame, fitted (a fractional scale only when the frame is
         -- taller than the card)
@@ -332,7 +469,7 @@ return function(mod)
       else
         drawHeadSpace(img, q, aw, ah, x, y, w, h, box)
       end
-      love.graphics.setScissor()
+      unclip()
       return true
     end
 
@@ -351,7 +488,7 @@ return function(mod)
       end
       local iw, ih = img:getDimensions()
       Theme.set(Theme.col.white)
-      love.graphics.setScissor(x, y, w, h)
+      clip(Theme, x, y, w, h)
       -- 16x16 icon sheet: taller sheets stack frames, so the resting frame is
       -- the first 16 rows, drawn at the largest whole multiple that fits.
       local fh = ih >= 32 and 16 or math.min(16, ih)
@@ -360,7 +497,7 @@ return function(mod)
       local dw, dh = 16 * s, fh * s
       love.graphics.draw(img, q2, math.floor(x + (w - dw) * 0.5),
         math.floor(y + (h - dh) * 0.5), 0, s, s)
-      love.graphics.setScissor()
+      unclip()
       return true
     end
 
@@ -381,10 +518,10 @@ return function(mod)
     local s = math.max(1, math.floor(h / ih))
     local dw, dh = iw * s, ih * s
     Theme.set(Theme.col.white)
-    love.graphics.setScissor(x, y, w, h)
+    clip(Theme, x, y, w, h)
     love.graphics.draw(img, quad(0, 0, iw, ih, iw, ih),
       math.floor(x + (w - dw) * 0.5), y, 0, s, s)
-    love.graphics.setScissor()
+    unclip()
     return true
   end
 

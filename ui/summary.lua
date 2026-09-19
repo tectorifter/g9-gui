@@ -23,12 +23,24 @@
 -- exported ModernStats and accessors when that mod is installed.  Every read
 -- is guarded, so the panel still shows a correct vanilla stat block (with
 -- blank modern rows) when it is not.
+--
+-- GEN 2: Gold's SummaryMenu is a different screen -- three pages (stats /
+-- moves / trainer data), the move manager and the egg page all in one, with
+-- its own party-walking navigation.  The Gen 2 arm therefore builds Gold's own
+-- src.ui.gen2.SummaryMenu (so all of that keeps running) and paints the suite
+-- panel through :drawWidescreen -- see the Gen 2 arm at the end.
 return function(mod, ctx)
   local Theme, Backdrop = ctx.Theme, ctx.Backdrop
   local opt = ctx.opt
   local MS, MoveCategory = ctx.ModernStats, ctx.MoveCategory
   -- the engine mod's handle, for the accessors g9-gui does not own
   local engine = ctx.engine
+  -- the shared roster/status reader (ui/roster.lua), for the Gen 2 identity
+  -- column's status chip
+  local Roster = ctx.Roster
+  local Gen2 = ctx.gen == 2
+  -- the shared page (surface fit/scale), used by the Gen 2 widescreen arm only
+  local Shell = ctx.Shell
 
   local M = {}
   local Stats = require("src.pokemon.Stats")
@@ -66,9 +78,15 @@ return function(mod, ctx)
 
   local function statOf(mon, key)
     local s = mon.stats or {}
-    if key == "spa" then return s.spa or s.special or s.spAtk or 0 end
-    if key == "spd" then return s.spd or s.special or s.spDef or 0 end
+    -- Gen 1 writes the derived block as spa/spd/spe (or a single `special`);
+    -- Gold's Stats.calc writes attack/defense/specialAttack/specialDefense/
+    -- speed.  Both spellings are read here so one stat row serves either game.
+    if key == "spa" then return s.spa or s.specialAttack or s.special or s.spAtk or 0 end
+    if key == "spd" then return s.spd or s.specialDefense or s.special or s.spDef or 0 end
     if key == "spe" then return s.spe or s.speed or 0 end
+    if key == "atk" then return s.atk or s.attack or 0 end
+    if key == "def" then return s.def or s.defense or 0 end
+    if key == "hp" then return s.hp or 0 end
     return s[key] or 0
   end
 
@@ -117,7 +135,9 @@ return function(mod, ctx)
   function M.wantsFillScale() return true end
   function M.sgbPalettes() return {} end
 
-  function M.new(game, mon)
+  function M.new(game, a)
+    if Gen2 then return M.newGen2(game, a) end
+    local mon = a
     local top = game.stack and game.stack.top and game.stack:top()
     -- overlay only when the screen underneath is one of ours and is actually
     -- going to draw (isOpaque on the party menu is what keeps it the base)
@@ -363,6 +383,360 @@ return function(mod, ctx)
     local total = pageTotal(mon, self.page)
     if total then t(total, PW - 90, PH - 30, "right", C.gold) end
     t(("%d/%d"):format(self.page, #PAGES), PW - BODY_X, PH - 30, "right", C.inkDim)
+
+    Theme.set(C.white)
+  end
+
+  -- ============================================================= Gen 2 (Gold)
+  -- Gold's SummaryMenu is ONE screen for three jobs: the three stats pages,
+  -- the move manager (opened by the party list's MOVE row OR by SELECT on the
+  -- MOVES page) and the egg page.  It owns its own navigation -- up/down walk
+  -- the party, left/right turn PINK/GREEN/BLUE, A falls through to the next
+  -- page and quits from BLUE, SELECT opens the move detail -- so, exactly like
+  -- every other screen, this arm builds that engine object
+  -- (src.ui.gen2.SummaryMenu) and swaps only :drawWidescreen.  What it draws is
+  -- Gold's own information set, laid out in the suite's panel: a STATS page of
+  -- the six derived stats, a MOVES page of the held item and the four moves, an
+  -- INFO page of the OT / ID / dex number, the move manager, and the egg page.
+  --
+  -- The panel floats over the party page exactly as the Gen 1 panel does: the
+  -- party screen beneath (one of ours) re-draws its own page for us, and the
+  -- dim is then applied, so Gold reads as the same lift.
+
+  local G2_TABS = { "STATS", "MOVES", "INFO" }
+
+  -- pcall a method and take its first answer (or nil).  The engine object may
+  -- be a bare stub and a missing accessor must not blank the page.
+  local function safe(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, v = pcall(fn, ...)
+    return ok and v or nil
+  end
+
+  local function g2def(self)
+    return safe(self.speciesDef, self)
+      or (self.pokemon and self.mon and self.pokemon[self.mon.species])
+  end
+
+  local function g2moves(self)
+    return safe(self.moveList, self) or (self.mon and self.mon.moves) or {}
+  end
+
+  local function g2moveName(self, entry)
+    if not entry then return nil end
+    return safe(self.moveName, self, entry) or tostring(entry.id or "?")
+  end
+
+  -- Word-wrap a paragraph to a measured pixel budget (Saira is proportional,
+  -- so there is no cell count to snap to).  The move manager's description
+  -- plaque has room for two lines, so a one-line `Theme.fit` used to cut most
+  -- of Gold's move text off mid-sentence.
+  local function g2wrap(text, font, maxW)
+    local out, line = {}, ""
+    for word in tostring(text):gmatch("%S+") do
+      local trial = (line == "" and word) or (line .. " " .. word)
+      if line ~= "" and Theme.w(trial, font) > maxW then
+        out[#out + 1] = line
+        line = word
+      else
+        line = trial
+      end
+    end
+    if line ~= "" then out[#out + 1] = line end
+    return out
+  end
+
+  -- the party page beneath the summary (Gold's PartyMenu), if it is one of ours
+  local function partyPageUnder(self)
+    local states = self.game and self.game.stack and self.game.stack.states
+    for i = #(states or {}), 1, -1 do
+      local s = states[i]
+      if s ~= self and s.__g9gui and type(s.__g9guiPage) == "function" then
+        return s
+      end
+    end
+    return nil
+  end
+
+  local function g2typeName(self, id)
+    if not id then return NONE end
+    local ok, TC = pcall(require, "src.battle.TypeChart")
+    if ok and TC and TC.displayName then
+      local ok2, n = pcall(TC.displayName, id, self.game and self.game.data)
+      if ok2 and n then return n end
+    end
+    return tostring(id)
+  end
+
+  local function g2Title(self, egg, font)
+    local mon = self.mon or {}
+    if egg then return "EGG" end
+    local def = g2def(self)
+    local name = mon.nickname or mon.name or (def and def.name)
+      or mon.species or "?"
+    return (Theme.fit(name, font, 225) or "?")
+      .. ("  Lv%d"):format(mon.level or 0)
+  end
+
+  function M.newGen2(game, opts)
+    local Summary2 = require("src.ui.gen2.SummaryMenu")
+    local self = Summary2.new(game, opts)
+    self.__g9gui = true
+    self.__t = 0
+    -- tick an animation counter; the engine's own update (pages, party walk,
+    -- the move manager, the cry) is otherwise untouched.
+    local baseUpdate = self.update
+    self.update = function(s, dt)
+      s.__t = (s.__t or 0) + 1
+      if baseUpdate then baseUpdate(s, dt) end
+    end
+    Shell.gen2Surface(Theme, self, function(s) M.drawGen2(s) end)
+    return self
+  end
+
+  local function drawTabs2(self, t, C, F)
+    local x = BODY_X
+    for i, name in ipairs(G2_TABS) do
+      local w = Theme.w(name, F.body) + 20
+      local on = i == self.page
+      Theme.set(on and C.accentDim or C.panelDeep, on and 1 or 0.7)
+      Theme.rect("fill", OX + x, OY + TAB_Y, w, TAB_H, 4)
+      if on then
+        Theme.set(C.accent)
+        Theme.rect("fill", OX + x, OY + TAB_Y + TAB_H - 1, w, 1, 0)
+      end
+      t(name, x + w * 0.5, TAB_Y + 4, "center", on and C.accent or C.inkFaint)
+      x = x + w + 6
+    end
+  end
+
+  -- PINK page: the six derived stats with bars on the left, the identity /
+  -- HP / status / type / exp block on the right.
+  local function drawStats2(self, t, bar, C, F)
+    local mon = self.mon or {}
+    drawStatRows(self, t, bar, mon, "stat")
+    local small = Theme.fonts(self.game).small
+    local maxHp = mon.maxHp or (mon.stats and mon.stats.hp) or 0
+    local slabel
+    if Roster and Roster.status then slabel = (Roster.status(self.game, mon)) end
+    local okT, t1, t2 = pcall(function() return self:typeNames() end)
+    if not okT then t1, t2 = nil, nil end
+    local typeStr = t1 or NONE
+    if t2 and t2 ~= t1 then typeStr = typeStr .. " / " .. t2 end
+    local rows = {
+      { "HP", ("%d/%d"):format(mon.hp or 0, maxHp) },
+      { "STATUS", slabel or "OK" },
+      { "TYPE", typeStr },
+      { "ITEM", safe(self.itemName, self) or NONE },
+      { "EXP", tostring(mon.experience or 0) },
+      { "NEXT", tostring(safe(self.expToNext, self) or 0) },
+    }
+    local y = ROW_TOP
+    for _, r in ipairs(rows) do
+      t(r[1], ID_X, y + 7, "left", C.inkFaint, small)
+      local budget = (ID_R - ID_X) - Theme.w(r[1], small) - 12
+      t(Theme.fit(r[2], small, budget), ID_R, y + 7, "right", C.ink, small)
+      y = y + ROW_STEP
+    end
+  end
+
+  -- GREEN page: the held item and the four moves with their PP.
+  local function drawMoves2(self, t, C, F)
+    -- the tab row occupies TAB_Y..TAB_Y+TAB_H, so the first line starts clear
+    -- of it (a row at ROW_TOP - ROW_STEP would run under the tabs)
+    local y = TAB_Y + TAB_H + 12
+    t("ITEM", BODY_X, y, "left", C.inkFaint)
+    t(safe(self.itemName, self) or "---", BODY_X + 80, y, "left", C.ink)
+    y = y + ROW_STEP
+    t("MOVE", BODY_X, y, "left", C.inkFaint)
+    t("PP", MV_PP_R, y, "right", C.inkFaint)
+    y = y + MV_STEP - 4
+    local moves = g2moves(self)
+    for i = 1, 4 do
+      local entry = moves[i]
+      if entry then
+        t(Theme.fit(g2moveName(self, entry) or "-", F.body,
+          MV_CAT_X - BODY_X - 16), BODY_X, y, "left", C.ink)
+        t(("%d/%d"):format(entry.pp or 0, entry.maxPp or entry.pp or 0),
+          MV_PP_R, y, "right", (entry.pp or 0) > 0 and C.ink or C.bad)
+      else
+        t("-", BODY_X, y, "left", C.inkFaint)
+        t("--/--", MV_PP_R, y, "right", C.inkFaint)
+      end
+      y = y + MV_STEP
+    end
+    Theme.set(C.border)
+    Theme.rect("fill", OX + BODY_X, OY + y + 4, PW - BODY_X * 2, 1, 0)
+    t("SELECT  MOVE MANAGER", BODY_X, y + 12, "left", C.gold)
+  end
+
+  -- BLUE page: the trainer data (ID / OT / dex number) beside the stats.
+  local function drawInfo2(self, t, bar, C, F)
+    local mon = self.mon or {}
+    local small = Theme.fonts(self.game).small
+    local def = g2def(self)
+    local rows = {
+      { "ID", tostring(safe(self.otId, self) or 0) },
+      { "OT", tostring(safe(self.otName, self) or "?") },
+      { "DEX", ("No.%03d"):format((def and def.dex) or 0) },
+    }
+    local y = ROW_TOP
+    for _, r in ipairs(rows) do
+      t(r[1], BODY_X, y, "left", C.inkFaint, small)
+      t(r[2], BODY_X + 70, y, "left", C.ink)
+      y = y + ROW_STEP
+    end
+    local y2 = ROW_TOP
+    for _, k in ipairs(ORDER) do
+      t(LABEL[k] or k, ID_X, y2 + 7, "left", C.inkFaint, small)
+      t(tostring(statOf(mon, k)), ID_R, y2 + 7, "right", C.ink, small)
+      y2 = y2 + ROW_STEP
+    end
+  end
+
+  local function drawEgg2(self, t, C, F)
+    local mon = self.mon or {}
+    t("EGG", BODY_X, ROW_TOP, "left", C.accent)
+    t("ID   ?????", BODY_X, ROW_TOP + ROW_STEP, "left", C.inkDim)
+    t("OT   ?????", BODY_X, ROW_TOP + ROW_STEP * 2, "left", C.inkDim)
+    local steps = mon.eggSteps or 0
+    local flavor = steps < 6
+      and "It's making sounds inside.  It's going to hatch soon!"
+      or steps < 11 and "It moves around inside sometimes."
+      or steps < 41 and "Wonder what's inside?  It needs more time."
+      or "This EGG needs a lot more time to hatch."
+    local ly = ROW_TOP + ROW_STEP * 3 + 6
+    Theme.set(C.border)
+    Theme.rect("fill", OX + BODY_X, OY + ly, PW - BODY_X * 2, 1, 0)
+    t(Theme.fit(flavor, F.body, PW - BODY_X * 2), BODY_X, ly + 12, "left",
+      C.inkDim)
+  end
+
+  -- The move manager: the four slots with a cursor, and either the held-move
+  -- "Where?" prompt or the selected move's type / attack power / description.
+  local function drawMoveDetail2(self, t, bar, C, F)
+    local moves = g2moves(self)
+    local y = ROW_TOP - 12
+    for i = 1, 4 do
+      local entry = moves[i]
+      local held = i == self.swapFrom
+      local sel = i == self.moveIndex
+      if sel or held then
+        Theme.set(sel and C.rowLit or C.accentDim, sel and 0.55 or 0.28)
+        Theme.rect("fill", OX + BODY_X - 8, OY + y - 5,
+          PW - (BODY_X - 8) * 2, MV_STEP - 4, 5)
+      end
+      if sel then
+        Theme.chevrons(OX + BODY_X - 4, OY + y + 2, 16, C.accent,
+          0.5 + 0.5 * math.sin((self.__t or 0) * 0.2))
+      end
+      t(entry and (g2moveName(self, entry) or "-") or "-", BODY_X + 16, y,
+        "left", sel and C.accent or C.ink)
+      if entry then
+        t(("%d/%d"):format(entry.pp or 0, entry.maxPp or entry.pp or 0),
+          PW - BODY_X, y, "right", (entry.pp or 0) > 0 and C.ink or C.bad)
+      else
+        t("--/--", PW - BODY_X, y, "right", C.inkFaint)
+      end
+      y = y + MV_STEP
+    end
+    y = y + 6
+    Theme.set(C.border)
+    Theme.rect("fill", OX + BODY_X, OY + y, PW - BODY_X * 2, 1, 0)
+    if self.swapFrom then
+      t("Where?", BODY_X, y + 10, "left", C.gold)
+      return
+    end
+    local entry = moves[self.moveIndex]
+    local def = entry and safe(self.moveDef, self, entry.id)
+    local power = (def and def.power) or 0
+    t("TYPE", BODY_X, y + 10, "left", C.inkFaint)
+    t(g2typeName(self, def and def.type), BODY_X + 60, y + 10, "left", C.ink)
+    t("ATTK/", BODY_X + 210, y + 10, "left", C.inkFaint)
+    t(power >= 2 and tostring(power) or "---", BODY_X + 280, y + 10, "left",
+      C.ink)
+    local desc = (def and def.description) or ""
+    desc = tostring(desc):gsub("<NEXT>", "  ")
+    local budget = PW - BODY_X * 2
+    local lines = g2wrap(desc, F.body, budget)
+    if lines[1] then
+      t(lines[1], BODY_X, y + 10 + ROW_STEP, "left", C.inkDim)
+    end
+    if lines[2] then
+      -- everything from the second line on, re-fitted to one line so a longer
+      -- description ends in an ellipsis instead of being silently dropped
+      local rest = table.concat(lines, " ", 2)
+      t(Theme.fit(rest, F.body, budget), BODY_X, y + 10 + ROW_STEP * 2,
+        "left", C.inkDim)
+    end
+  end
+
+  function M.drawGen2(self)
+    local game = self.game
+    local C = Theme.col
+    local F = Theme.fonts(game)
+    local background = opt("ui_background") ~= "false"
+    local embellish = opt("ui_embellishment") ~= "false"
+
+    -- the party page under the panel (Gold's PartyMenu draws its own page for
+    -- us), so the summary reads as the same lift it is on Gen 1
+    local under = partyPageUnder(self)
+    if under then
+      under.__g9guiPage(under)
+    else
+      Backdrop.draw(Theme, { w = W, h = H, t = self.__t or 0,
+        background = background, embellishment = embellish })
+    end
+    Theme.set(C.black, 0.62)
+    Theme.rect("fill", 0, 0, W, H, 0)
+
+    Theme.panel(OX, OY, PW, PH, { radius = 8, shadow = 5,
+      color = C.panelLit, border = C.borderLit })
+    if embellish then
+      Theme.brackets(OX + 5, OY + 5, PW - 10, PH - 10, 20, C.accentDim)
+    end
+
+    local function P(x, y) return OX + x, OY + y end
+    local function t(str, x, y, align, col, font)
+      local px, py = P(x, y)
+      Theme.text(str, px, py, font or F.body, align, col)
+    end
+    local function bar(x, y, w, h, frac, col, o)
+      local px, py = P(x, y)
+      Theme.bar(px, py, w, h, frac, col, o)
+    end
+
+    local egg = self.mon and self.mon.isEgg
+    local moveMode = self.moveScreen or self.moveDetail
+
+    Theme.set(C.panelDeep, 0.95)
+    Theme.rect("fill", OX + 1, OY + 1, PW - 2, 40, 7)
+    Theme.set(C.accent, 0.35)
+    Theme.rect("fill", OX + 1, OY + 41, PW - 2, 1, 0)
+    t(moveMode and "MOVE MANAGER" or "ADV.STATS", BODY_X, 8, "left", C.accent)
+    t(g2Title(self, egg, F.body), PW - BODY_X, 8, "right", C.ink)
+
+    if egg then
+      drawEgg2(self, t, C, F)
+    elseif moveMode then
+      drawMoveDetail2(self, t, bar, C, F)
+    else
+      drawTabs2(self, t, C, F)
+      if self.page == 2 then drawMoves2(self, t, C, F)
+      elseif self.page == 3 then drawInfo2(self, t, bar, C, F)
+      else drawStats2(self, t, bar, C, F) end
+    end
+
+    Theme.set(C.border)
+    Theme.rect("fill", OX + BODY_X, OY + PH - 36, PW - BODY_X * 2, 1, 0)
+    if moveMode then
+      t("A  PICK/PLACE", BODY_X, PH - 30, "left", C.inkFaint)
+      t("L/R  POK\xc3\xa9MON", PW * 0.5, PH - 30, "center", C.inkFaint)
+      t("B  BACK", PW - BODY_X, PH - 30, "right", C.inkFaint)
+    else
+      t("L/R  PAGE", BODY_X, PH - 30, "left", C.inkFaint)
+      t(G2_TABS[self.page] or "", PW - BODY_X, PH - 30, "right", C.inkDim)
+    end
 
     Theme.set(C.white)
   end

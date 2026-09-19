@@ -3,14 +3,14 @@
 --
 -- One row per party slot (up to six), top to bottom:
 --
---      *  [ portrait ]  BULBASAUR        63   210/210
+--      *  [ portrait ]  BULBASAUR  210/210        Lv 63
 --         [  head    ]  #########HP####  ******EXP**
 --
 -- The portrait is a wide band (56x34), not a square tile: the pack's art is a
 -- full-body frame, and a band cropped to its head is the one shape that reads
 -- as a portrait at this size (ui/portraits.lua does the crop).  The name, the
--- gold level and the HP/MAX figures share ONE line, with the HP and EXP gauges
--- on the band under it.  Six rows of 40px fill the roster column.
+-- HP/MAX figures and the level share ONE line, with the HP and EXP gauges on
+-- the band under it.  Six rows of 40px fill the roster column.
 --
 -- There is no header row: at body 22 a heading row would push the sixth slot
 -- past the footer rule, and the gold level / "30/38" figures do not need column
@@ -22,12 +22,12 @@
 -- Columns (offsets from the area's left edge; the area is 348 wide).  Every
 -- one of them is a MEASURED budget, not a character count: Saira is
 -- proportional, so a name is truncated by Theme.fit against the pixels that
--- actually remain before the gold level column.
+-- actually remain before the HP figures.
 --   chevron       2 ..  20   (18px cursor, centred in the row)
 --   portrait     24 ..  80   (56 wide, 34 tall)
---   name         88 (left-aligned, cut to 154px -- "KANGASKHAN" needs 152)
---   LEVEL        right-aligned at 282 (gold, SemiBold)
---   HP/MAX       right-aligned at 348 (secondary size)
+--   name         88 (left-aligned, cut to the pixels the HP figures leave)
+--   HP/MAX       right-aligned at 282 (secondary size) -- beside the name
+--   LEVEL        right-aligned at 348 (gold, SemiBold, a tiny "Lv" prefix)
 --   HP gauge     88 .. 254   (row bottom, 11 tall)
 --   EXP bar     264 .. 348   (row bottom, 11 tall)
 return function(mod)
@@ -39,13 +39,17 @@ return function(mod)
   R.HEADER_H = 0
 
   local CHEV_X, CHEV_S = 2, 18
-  -- The card is 56x34 (1.65:1), not a 96px band: a wide card forced the head
-  -- crop to 3x zoom and the top of the frame alone filled it.  The crop takes
-  -- the card's own aspect, so the window is 34x20 of the trimmed frame -- the
-  -- whole head and shoulders of a full-body front sprite -- at a clean 2x.
+  -- The card is 56x34 (1.65:1), not a 96px band: a wider card forced a bigger
+  -- head-crop zoom and the top of the frame alone filled it.  The crop takes
+  -- the card's own 56x34 of the trimmed frame, anchored to the creature's head
+  -- and drawn at the pack's OWN 1:1 pixels (see ui/portraits.lua), so every
+  -- species keeps the size the pack gives it -- a Weedle beside an Amoonguss.
   local CARD_X, CARD_W, CARD_YO, CARD_H = 24, 56, 3, 34
   local NAME_X = 88
-  local LV_R, HP_R = 282, 348
+  -- Round 200 swapped the two right-hand columns: the HP/MAX figures sit next
+  -- to the name (where the level used to be) and the level moved out to the
+  -- row's right edge with a tiny "Lv" ahead of it.
+  local HP_R, LV_R = 282, 348
   local HPG_X, HPG_W, HPG_H = 88, 166, 11
   local EXP_X, EXP_W, EXP_H = 264, 84, 11
   -- every y below is an INK top (Theme.text's y), so a 15px line occupies
@@ -61,8 +65,11 @@ return function(mod)
     return mon.nickname or (def and def.name) or tostring(mon.species or "?")
   end
 
+  -- Gold keeps the max on the record itself (Mon.refreshStats writes mon.maxHp);
+  -- Gen 1 reads it off the derived stat block.  Both are checked so one reader
+  -- serves either generation.
   function R.maxHp(mon)
-    return (mon.stats and mon.stats.hp) or 0
+    return mon.maxHp or (mon.stats and mon.stats.hp) or 0
   end
 
   function R.hpFrac(mon)
@@ -73,30 +80,59 @@ return function(mod)
     return f
   end
 
+  -- the experience needed to reach `lvl` on the def's curve.  Gen 1 has the
+  -- whole table in src.pokemon.Growth; Gold keeps its curves on the data
+  -- (data.pokemon.growthRates) and answers through src.battle.gen2.Mon, so the
+  -- two are tried in that order and a missing curve degrades to 0, not an error.
+  local function expAt(game, def, lvl, gen)
+    if gen == 2 then
+      local ok, Mon = pcall(require, "src.battle.gen2.Mon")
+      if ok and Mon and Mon.growthFor and Mon.experienceForLevel then
+        local growth = Mon.growthFor(game and game.data, def.growthRate)
+        if growth then return Mon.experienceForLevel(growth, lvl) end
+      end
+      return nil
+    end
+    return Growth.expForLevel(def.growthRate, lvl)
+  end
+
   -- fraction of the way from this level's floor to the next level's floor
-  function R.expFrac(mon, def)
+  function R.expFrac(mon, def, gen, game)
     if not def or not def.growthRate then return 0 end
     local lvl = mon.level or 1
     if lvl >= 100 then return 1 end
-    local cur = Growth.expForLevel(def.growthRate, lvl)
-    local nxt = Growth.expForLevel(def.growthRate, lvl + 1)
+    local cur = expAt(game, def, lvl, gen)
+    local nxt = expAt(game, def, lvl + 1, gen)
+    if not (cur and nxt) then return 0 end
     if nxt <= cur then return 1 end
-    local f = ((mon.exp or 0) - cur) / (nxt - cur)
+    -- Gold keeps the running total on `experience`, Gen 1 (and the suite's own
+    -- fixtures) on `exp`; read whichever is there.
+    local f = (((mon.exp or mon.experience) or 0) - cur) / (nxt - cur)
     if f < 0 then f = 0 elseif f > 1 then f = 1 end
     return f
   end
 
-  -- the status chip's label and palette key, or nil
+  -- the status chip's label and palette key, or nil.  Gold keeps its status
+  -- registry on data.gen2Statuses and spells the status as a lowercase effect
+  -- id (burn/sleep/...), which the shared src.battle.Status maps through
+  -- GEN2_ID_ALIASES; Gen 1 answers straight off data.statuses.
   function R.status(game, mon)
     if (mon.hp or 0) <= 0 then return "FNT", "bad" end
     if not mon.status then return nil end
     local label
     local ok, Status = pcall(require, "src.battle.Status")
-    if ok and Status.hudLabelFor and game.data.statuses then
-      label = Status.hudLabelFor(game.data.statuses, mon.status)
+    if ok and Status.hudLabelFor then
+      local data = game and game.data or {}
+      if data.statuses then
+        label = Status.hudLabelFor(data.statuses, mon.status)
+      elseif data.gen2Statuses then
+        local key = tostring(mon.status):lower()
+        label = Status.hudLabelFor(data.gen2Statuses,
+          Status.GEN2_ID_ALIASES and (Status.GEN2_ID_ALIASES[key] or key) or key)
+      end
     end
     if not label or label == "" then return nil end
-    local s = tostring(mon.status)
+    local s = tostring(label):upper()
     local key = "warn"
     if s == "PSN" or s == "TOX" then key = "bad"
     elseif s == "SLP" or s == "FRZ" then key = "accent" end
@@ -123,8 +159,8 @@ return function(mod)
     local x, y = opts.x, opts.y
     local f = Theme.fonts(game).small
     local C = Theme.col
-    Theme.text("LEVEL", x + LV_R, y + 2, f, "right", C.inkFaint)
     Theme.text("HP/MAX", x + HP_R, y + 2, f, "right", C.inkFaint)
+    Theme.text("LEVEL", x + LV_R, y + 2, f, "right", C.inkFaint)
     Theme.text("EXP", x + EXP_X, y + 2, f, "left", C.inkFaint)
     if opts.embellish ~= false then
       Theme.rule(x, y + headerH(opts) - 5, opts.w or 348, C.border)
@@ -143,6 +179,7 @@ return function(mod)
   --   embellish      false to skip the header rule and row highlights
   --   logic          optional engine PartyMenu logic (tmhm/evoStone/heal)
   --   portraits      the portraits module
+  --   gen            1 or 2 (which exp-curve reader to use); defaults to 1
   -- }
   function R.draw(Theme, game, opts)
     local Portraits = opts.portraits
@@ -197,19 +234,13 @@ return function(mod)
       Theme.set(C.cardEdge)
       Theme.rect("line", cx + 0.5, cy + 0.5, CARD_W - 1, CARD_H - 1, 5)
 
-      -- name, beside the card (cut to the pixels left before the gold level)
-      local name = Theme.fit(R.name(mon, def), F.body, NAME_MAX_PX)
-      Theme.text(name, x + NAME_X, y + LINE_Y, F.body, "left", C.white)
-
-      -- level, in the reference's gold column -- SemiBold, the way the
-      -- reference weights its numbers
-      Theme.text(tostring(mon.level or 0), x + LV_R, y + LINE_Y, F.bold,
-        "right", C.gold)
-
+      -- The figures in the HP column -- or the teaching verdict that replaces
+      -- them -- are measured BEFORE the name is drawn, so a long name stops in
+      -- front of them instead of running underneath: Saira is proportional and
+      -- "210/210" is much wider than "63/63".
       local teaching = logic and (logic.tmhm or logic.evoStone)
+      local can = false
       if teaching then
-        -- the engine's teaching / evolution-stone views replace the bar
-        local can = false
         if logic.tmhm and logic.tmhm.move then
           for _, m in ipairs((def and def.tmhm) or {}) do
             if m == logic.tmhm.move then can = true break end
@@ -221,14 +252,38 @@ return function(mod)
             end
           end
         end
-        Theme.text(can and "ABLE" or "NOT ABLE", x + HP_R, y + LINE_Y, F.small,
-          "right", can and C.good or C.inkFaint)
+      end
+      local shown = mon.hp or 0
+      local heal = logic and logic.heal
+      if heal and heal.mon == mon then shown = math.floor(heal.shown) end
+      local hpText = teaching and (can and "ABLE" or "NOT ABLE")
+        or ("%d/%d"):format(shown, R.maxHp(mon))
+      local nameMax = math.min(NAME_MAX_PX,
+        HP_R - Theme.w(hpText, F.small) - 10 - NAME_X)
+      if nameMax < 48 then nameMax = 48 end
+
+      -- name, beside the card
+      local name = Theme.fit(R.name(mon, def), F.body, nameMax)
+      Theme.text(name, x + NAME_X, y + LINE_Y, F.body, "left", C.white)
+
+      -- level, in the row's OUTER column now (round 200 swapped it with
+      -- HP/MAX): gold and SemiBold the way the reference weights its numbers,
+      -- with a tiny "Lv" sitting on the digits' own baseline ahead of them
+      local lvFont = F.tiny or F.small
+      local lvNum = tostring(mon.level or 0)
+      local lvX = x + LV_R
+        - (Theme.w("Lv", lvFont) + 4 + Theme.w(lvNum, F.bold))
+      Theme.text("Lv", lvX,
+        y + LINE_Y + Theme.capOf(F.bold) - Theme.capOf(lvFont),
+        lvFont, "left", C.inkFaint)
+      Theme.text(lvNum, x + LV_R, y + LINE_Y, F.bold, "right", C.gold)
+
+      if teaching then
+        -- the engine's teaching / evolution-stone views replace the HP figures
+        Theme.text(hpText, x + HP_R, y + LINE_Y, F.small, "right",
+          can and C.good or C.inkFaint)
       else
-        local shown = mon.hp or 0
-        local heal = logic and logic.heal
-        if heal and heal.mon == mon then shown = math.floor(heal.shown) end
-        Theme.text(("%d/%d"):format(shown, R.maxHp(mon)), x + HP_R, y + LINE_Y,
-          F.small, "right", C.ink)
+        Theme.text(hpText, x + HP_R, y + LINE_Y, F.small, "right", C.ink)
         local max = R.maxHp(mon)
         local frac = max > 0 and (shown / max) or 0
         if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
@@ -238,7 +293,7 @@ return function(mod)
         -- EXP bar, its own column after HP/MAX, with no numbers on it
         Theme.set(C.panelDeep, 0.9)
         Theme.rect("fill", x + EXP_X, y + BARS_Y, EXP_W, EXP_H, 3)
-        local ef = R.expFrac(mon, def)
+        local ef = R.expFrac(mon, def, opts.gen, game)
         if ef > 0 then
           local col = ((mon.level or 1) >= 100) and C.gold or C.accent
           Theme.set(col, 0.9)

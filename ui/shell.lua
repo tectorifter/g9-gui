@@ -103,11 +103,98 @@ return function(mod)
     return false
   end
 
+  -- ------------------------------------------------------------- gen 2 surface
+  -- Gold has no :uiSize(); a screen that wants the big page answers
+  -- :drawsWidescreen() and paints the whole window itself.  These are the Gen 2
+  -- half of the surface contract above.  S.gen2Page fills the window with the
+  -- suite's own void, computes the FILL scale for the 540x360 page (the same
+  -- min(winW/540, winH/360) the Gen 1 Renderer's uiFill path uses, so both
+  -- generations blit the page at one size) and draws the page under a
+  -- translate/scale.  S.gen2Surface installs the three methods on an instance,
+  -- so a screen module only supplies its page painter.
+  function S.gen2Fit(winW, winH)
+    winW = tonumber(winW) or S.W
+    winH = tonumber(winH) or S.H
+    local scale = math.min(winW / S.W, winH / S.H)
+    if not (scale and scale > 0) then scale = 1 end
+    local ox = math.floor((winW - S.W * scale) / 2 + 0.5)
+    local oy = math.floor((winH - S.H * scale) / 2 + 0.5)
+    return scale, ox, oy
+  end
+
+  function S.gen2Page(Theme, self, winW, winH, drawFn)
+    local G = love.graphics
+    local C = Theme.col
+    local scale, ox, oy = S.gen2Fit(winW, winH)
+    -- the surround: the suite's own void edge to edge, so a window that is not
+    -- 3:2 letterboxes in the design's dark blue rather than the cart's paper
+    Theme.set(C.voidDeep)
+    Theme.rect("fill", 0, 0, tonumber(winW) or S.W, tonumber(winH) or S.H, 0)
+    if G.push then G.push() end
+    G.translate(ox, oy)
+    G.scale(scale, scale)
+    -- Publish the page->window mapping while the page draws.  The page is drawn
+    -- in its own 540x360 coordinates under this translate/scale, but
+    -- love.graphics.setScissor works in WINDOW pixels and is NOT affected by
+    -- graphical transformations ("The dimensions of the scissor are unaffected
+    -- by graphical transformations" -- love.graphics.setScissor), so any rect
+    -- that must be clipped has to map itself out of page space through this.
+    -- `nil` means there is no transform (Gen 1 draws its page into a real
+    -- 540x360 surface at 1:1).  See ui/portraits.lua's clip.
+    local prev = Theme.page
+    Theme.page = { scale = scale, ox = ox, oy = oy }
+    drawFn(self)
+    Theme.page = prev
+    if G.pop then G.pop() end
+    Theme.set(C.white)
+  end
+
+  function S.gen2Surface(Theme, self, drawFn)
+    self.drawsWidescreen = function() return true end
+    self.wantsFillScale = function() return true end
+    self.drawWidescreen = function(s, winW, winH)
+      S.gen2Page(Theme, s, winW, winH, drawFn)
+    end
+  end
+
+  -- ------------------------------------------------------------ display text
+  -- Engine-authored labels carry the cart's print-time glyph macros: Gold's
+  -- START menu spells its POKeGEAR row "<PO><KE>GEAR" (the $70/$71 ligature
+  -- tiles) and prompts write POKeMON as "#MON".  On the cart the tile font
+  -- expands them at print time (src/render/Font.lua's charmap + MACRO_TEXT);
+  -- this suite draws Saira, which has no such tiles, so the macros would reach
+  -- the screen raw -- the "<PO><KE>GEAR" row in the Gen 2 rail.  Expand them to
+  -- the text the cart would draw, long before Theme.fit measures anything.
+  -- Gen 1 labels already hold real characters, so this is a no-op there; a
+  -- token with no entry is left exactly as it was.
+  local TOKENS = {
+    -- charmap.asm $70/$71: "<PO>" + "<KE>" together spell POKe ("<POKE>", $24)
+    PO = "PO", KE = "K\xc3\xa9",
+    POKE = "POK\xc3\xa9",
+    PK = "PK", MN = "MN", PKMN = "POK\xc3\xa9MON",
+    PC = "PC", TM = "TM",
+    TRAINER = "TRAINER", ROCKET = "ROCKET",
+    ["\xe2\x80\xa6\xe2\x80\xa6"] = "\xe2\x80\xa6\xe2\x80\xa6",
+  }
+
+  function S.display(text)
+    if type(text) ~= "string" or text == "" then return text end
+    local out = text:gsub("<([^%s<>]+)>", TOKENS)
+    -- charmap.asm $54: "#" prints POKe (the cart's "#MON"/"#DEX" macro).  Only
+    -- a "#" introducing a capital is the macro; any other "#" is the literal.
+    out = out:gsub("#(%u)", "POK\xc3\xa9%1")
+    return out
+  end
+
   -- ------------------------------------------------------------------- money
   -- The player's wallet is ONE readout on the header's second line, directly
-  -- under the BADGES / DEX readout -- not a column in the roster.
+  -- under the BADGES / DEX readout -- not a column in the roster.  Gold keeps
+  -- it on save.player.money.
   function S.money(game)
-    return ("MONEY: %d"):format((game and game.save and game.save.money) or 0)
+    local save = game and game.save
+    local m = (save and save.player and save.player.money)
+      or (save and save.money) or 0
+    return ("MONEY: %d"):format(m)
   end
 
   -- ------------------------------------------------------------------- header
@@ -123,7 +210,8 @@ return function(mod)
       Theme.diamond(24, S.HDR_Y + 9, 7, C.accent)
       Theme.diamond(24, S.HDR_Y + 9, 3, C.void)
     end
-    local tw = Theme.text(opts.title or "", leftX, S.HDR_Y, F.body, "left", C.ink)
+    local title = S.display(opts.title or "")
+    local tw = Theme.text(title, leftX, S.HDR_Y, F.body, "left", C.ink)
 
     -- The right readout is the one header string that genuinely grows: the
     -- Safari Zone appends its step and BALL counters to the badge/time/dex
@@ -133,25 +221,33 @@ return function(mod)
     if opts.right then
       local avail = (S.W - m) - (leftX + tw) - 16
       local rf = F.body
-      if Theme.w(opts.right, rf) > avail then rf = F.small end
+      local right = S.display(opts.right)
+      if Theme.w(right, rf) > avail then rf = F.small end
       local ry = S.HDR_Y + capB - Theme.capOf(rf)
-      Theme.text(Theme.fit(opts.right, rf, avail), S.W - m, ry, rf, "right",
+      Theme.text(Theme.fit(right, rf, avail), S.W - m, ry, rf, "right",
         C.gold)
     end
 
     -- Second line: the selected row's caption on the left, the wallet on the
     -- right.  The caption is cut by RENDERED width, leaving the wallet its own
     -- room so the two can never meet.
-    local cap = opts.caption
+    --
+    -- `opts.captionFont` lets a caller whose caption is a two-button control
+    -- hint (the `national_dex` POKeDEX listing) draw it on the secondary rung:
+    -- the suite's row descriptions are short sentences, but that hint is long
+    -- enough to be cut at body size, and a hint under a gold wallet reads fine
+    -- one rung down.
+    local cap = S.display(opts.caption)
+    local cf = opts.captionFont or F.body
     if opts.money then
       local mw = Theme.w(opts.money, F.bold)
       Theme.text(opts.money, S.W - m, S.CAP_Y, F.bold, "right", C.gold)
-      cap = Theme.fit(cap, F.body, (S.W - m) - mw - 16 - leftX)
+      cap = Theme.fit(cap, cf, (S.W - m) - mw - 16 - leftX)
     else
-      cap = Theme.fit(cap, F.body, (S.W - m) - leftX)
+      cap = Theme.fit(cap, cf, (S.W - m) - leftX)
     end
     if cap and cap ~= "" then
-      Theme.text(cap, leftX, S.CAP_Y, F.body, "left", C.inkDim)
+      Theme.text(cap, leftX, S.CAP_Y, cf, "left", C.inkDim)
     end
 
     Theme.rule(S.MARGIN - 2, S.RULE_Y, S.W - (S.MARGIN - 2) * 2, C.border)
@@ -184,6 +280,12 @@ return function(mod)
   -- opts = { items (labels or {label=}), index (the cursor row), active (a row
   --          that is not the cursor but is the section being shown), scroll,
   --          maxVisible, t }
+  --
+  -- A caller may override the geometry (x, y, w, row, labelPad) when its page
+  -- has no roster beside the rail -- the title menu's rail is wider than the
+  -- START screen's 152px so a longer label like NEW GAME is never cut.  The
+  -- defaults are the spread's own numbers, so the START and POKeMON pages are
+  -- unchanged.
   function S.rows(Theme, game, opts)
     local C = Theme.col
     local F = Theme.fonts(game).body
@@ -191,43 +293,46 @@ return function(mod)
     if #items == 0 then return end
     local visible = opts.maxVisible and math.min(opts.maxVisible, #items) or #items
     local scroll = opts.scroll or 0
-    local h = visible * S.LIST_ROW + 4
-    Theme.panel(S.LIST_X, S.LIST_Y, S.LIST_W, h, { radius = 6, shadow = 2 })
+    local x = opts.x or S.LIST_X
+    local ry0 = opts.y or S.LIST_Y
+    local w = opts.w or S.LIST_W
+    local row = opts.row or S.LIST_ROW
+    local lx = x + (opts.labelPad or 34)
+    local h = visible * row + 4
+    Theme.panel(x, ry0, w, h, { radius = 6, shadow = 2 })
 
-    local y = S.LIST_Y + 2
-    for row = 1, visible do
-      local item = items[scroll + row]
+    local y = ry0 + 2
+    for i = 1, visible do
+      local item = items[scroll + i]
       if not item then break end
       local label = type(item) == "string" and item or (item.label or "")
-      local at = scroll + row
+      label = S.display(label)
+      local at = scroll + i
       local selected = at == opts.index
       local band = selected or at == opts.active
-      -- The band's own rect is LIST_ROW - 2 tall, i.e. y-2 .. y+28: an 18px
-      -- chevron centred in it starts at y+5 and a 15px-ink label at y+6.
+      -- The band's own rect is row - 2 tall: an 18px chevron centred in it
+      -- starts at y+5 and a 15px-ink label at y+6.
       if band then
         Theme.set(C.rowLit, selected and 0.55 or 0.34)
-        Theme.rect("fill", S.LIST_X + 4, y - 2, S.LIST_W - 8, S.LIST_ROW - 2, 5)
+        Theme.rect("fill", x + 4, y - 2, w - 8, row - 2, 5)
       end
-      local lx = S.LIST_LABEL_X
-      local label2 = Theme.fit(label, F,
-        (S.LIST_X + S.LIST_W) - lx - 6)
+      local label2 = Theme.fit(label, F, (x + w) - lx - 6)
       if selected then
-        Theme.chevrons(S.LIST_X + 8, y + 5, 18, C.accent,
+        Theme.chevrons(x + 8, y + 5, 18, C.accent,
           0.5 + 0.5 * math.sin((opts.t or 0) * 0.18))
         -- double-print the selected row for weight
         Theme.text(label2, lx, y + 6, F, "left", C.accent)
         Theme.text(label2, lx + 1, y + 6, F, "left", C.accent)
       else
-        Theme.text(label2, lx, y + 6, F, "left",
-          band and C.ink or C.inkDim)
+        Theme.text(label2, lx, y + 6, F, "left", band and C.ink or C.inkDim)
       end
-      y = y + S.LIST_ROW
+      y = y + row
     end
 
     if opts.maxVisible and scroll + opts.maxVisible < #items then
       Theme.set(C.accent)
-      love.graphics.polygon("fill", S.LIST_X + S.LIST_W - 20, y - 12,
-        S.LIST_X + S.LIST_W - 8, y - 12, S.LIST_X + S.LIST_W - 14, y - 4)
+      love.graphics.polygon("fill", x + w - 20, y - 12,
+        x + w - 8, y - 12, x + w - 14, y - 4)
     end
   end
 
@@ -237,19 +342,23 @@ return function(mod)
   -- own state into plain view rows and this draws them, so every list in the
   -- game reads as the same page.
   --
-  -- rows[i] = { text, right, marker, dim, header }
+  -- rows[i] = { text, right, marker, dim, header, indent }
   --   text   the row's own label
   --   right  right-aligned trailing text (a count, a value, a price)
   --   marker true draws the small lozenge (the POKeDEX's owned ball)
   --   dim    true draws the label faint (a disabled row)
   --   header true draws a section heading -- no band, no cursor
+  --   indent extra left indent in pixels (the dex strip's family tree)
   --
-  -- opts = { rows, index, scroll, maxVisible, x, y, w, row, t, rightPad }
+  -- opts = { rows, index, scroll, maxVisible, x, y, w, row, t, rightPad, font }
   -- `index`/`scroll` are counted in ROWS, so a header row is addressable and
   -- the caller's own scroll arithmetic (cursorRows / syncScroll) applies.
+  -- `font` overrides the row face for a denser strip (a 20px row needs the
+  -- secondary size; the default body is the menu's own).
   function S.list(Theme, game, opts)
     local C = Theme.col
-    local F = Theme.fonts(game)
+    local fonts = Theme.fonts(game)
+    local F = opts.font or fonts.body
     local rows = opts.rows or {}
     if #rows == 0 then return end
     local x = opts.x or S.LIST_X
@@ -268,11 +377,14 @@ return function(mod)
       local item = rows[scroll + i]
       if not item then break end
       local at = scroll + i
-      local lx = x + labelPad
+      -- A row may ask for extra left indent on top of the label gutter: the
+      -- evolution strip indents each stage one step, and the value is in
+      -- pixels (Saira is proportional, so there is no cell to count).
+      local lx = x + labelPad + (tonumber(item.indent) or 0)
       if item.header then
         Theme.rule(x + 8, ry + row - 8, w - 16, C.border)
-        Theme.text(Theme.fit(item.text or "", F.small, w - 20), x + 12,
-          ry + 5, F.small, "left", C.inkFaint)
+        Theme.text(Theme.fit(S.display(item.text or ""), fonts.small, w - 20),
+          x + 12, ry + 5, fonts.small, "left", C.inkFaint)
       else
         local selected = at == opts.index
         local band = selected or at == opts.active
@@ -286,19 +398,19 @@ return function(mod)
         elseif item.marker then
           Theme.diamond(x + 15, ry + row * 0.5 - 3, 4, C.accentDim)
         end
-        local rw = item.right and (Theme.w(item.right, F.body) + 14) or 0
+        local rw = item.right and (Theme.w(S.display(item.right), F) + 14) or 0
         local budget = (x + w - rightPad - rw) - lx
         local ink = C.ink
         if item.dim then ink = C.inkFaint
         elseif selected then ink = C.accent
         elseif band then ink = C.ink end
-        local label = Theme.fit(item.text or "", F.body, budget)
-        Theme.text(label, lx, ry + 6, F.body, "left", ink)
+        local label = Theme.fit(S.display(item.text or ""), F, budget)
+        Theme.text(label, lx, ry + 6, F, "left", ink)
         if selected then -- double-print for weight, like the START rail
-          Theme.text(label, lx + 1, ry + 6, F.body, "left", ink)
+          Theme.text(label, lx + 1, ry + 6, F, "left", ink)
         end
         if item.right then
-          Theme.text(item.right, x + w - rightPad, ry + 6, F.body, "right",
+          Theme.text(S.display(item.right), x + w - rightPad, ry + 6, F, "right",
             selected and C.accent or C.gold)
         end
       end
@@ -324,13 +436,18 @@ return function(mod)
   -- POKeMON page is reached with LEFT/RIGHT instead -- see ui/start_menu.lua),
   -- and the two screens must draw the identical rail.  `partyLabel` is passed
   -- in because only the caller has Strings.
-  function S.startRows(game, partyLabel)
+  -- `gen` selects which engine START menu supplies the rows: Gen 1's
+  -- src.ui.StartMenu or Gold's src.ui.gen2.StartMenu (which carries one row
+  -- Gen 1's does not -- POKeGEAR).  A single game table boots one generation,
+  -- so one cache slot per game is enough.
+  function S.startRows(game, partyLabel, gen)
     if type(game) ~= "table" then return nil end
     if game.__g9guiStartRows then return game.__g9guiStartRows end
-    local ok, StartMenu = pcall(require, "src.ui.StartMenu")
+    local path = (gen == 2) and "src.ui.gen2.StartMenu" or "src.ui.StartMenu"
+    local ok, StartMenu = pcall(require, path)
     if not (ok and type(StartMenu) == "table"
       and type(StartMenu.new) == "function") then return nil end
-    local ok2, menu = pcall(StartMenu.new, game)
+    local ok2, menu = pcall(StartMenu.new, game, {})
     if not (ok2 and type(menu) == "table") then return nil end
     local rows = {}
     for i, item in ipairs(menu.items or {}) do

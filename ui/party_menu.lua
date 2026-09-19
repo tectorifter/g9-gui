@@ -19,6 +19,11 @@
 -- detail card is gone: everything it duplicated (level, HP figures, the HP
 -- gauge, status) is already on the member's own row, so the column now shows
 -- the START menu's rows instead, exactly where the START menu draws them.
+--
+-- GEN 2: the same page on Gold.  The module builds Gold's own
+-- src.ui.gen2.PartyMenu (so its STATS/SWITCH/MOVE/ITEM/MAIL/field-move actions
+-- and its swap and medicine animations all keep running) and paints the page
+-- through :drawWidescreen instead of :uiSize -- see the Gen 2 arm at the end.
 return function(mod, ctx)
   local Theme, Backdrop, Roster, Portraits = ctx.Theme, ctx.Backdrop,
     ctx.Roster, ctx.Portraits
@@ -26,8 +31,15 @@ return function(mod, ctx)
   local opt = ctx.opt
 
   local M = {}
-  local Builtin = require("src.ui.PartyMenu")
   local Strings = require("src.core.Strings")
+  local Gen2 = ctx.gen == 2
+
+  -- The engine's OWN PartyMenu class, one per generation.  Required lazily so a
+  -- Gen 1 boot never pulls the Gold module in (src/ui/gen2/PartyMenu.lua).
+  local function builtin()
+    if Gen2 then return require("src.ui.gen2.PartyMenu") end
+    return require("src.ui.PartyMenu")
+  end
 
   local W, H = Shell.W, Shell.H
 
@@ -49,7 +61,8 @@ return function(mod, ctx)
   function M.sgbPalettes() return {} end
 
   function M.new(game, opts)
-    local self = Builtin.new(game, opts)
+    if Gen2 then return M.newGen2(game, opts) end
+    local self = builtin().new(game, opts)
     self.__g9gui = true
     self.isOpaque = true
     self.letterboxWhite = true
@@ -194,6 +207,149 @@ return function(mod, ctx)
       { key = "A", text = "OK" },
     }
     if self.__fromStart then
+      hints[#hints + 1] = { key = "\xe2\x86\x90\xe2\x86\x92", text = "MENU" }
+    end
+    hints[#hints + 1] = { key = "B", text = "BACK" }
+    Shell.footer(Theme, game, { hints = hints })
+
+    Theme.set(C.white)
+  end
+
+  -- ============================================================= Gen 2 (Gold)
+  -- Gold's PartyMenu is the same idea on a different engine object
+  -- (src/ui/gen2/PartyMenu.lua): it owns the same party/index/cursor, but the
+  -- field submenu lives at self.submenu {items,index,...} and its registry
+  -- writes lowercase status ids.  The arm below builds the REAL Gen 2 object
+  -- -- so every action (STATS, SWITCH, MOVE, ITEM/MAIL, the field moves, the
+  -- medicine HP-fill and swap animations, TM/HM ABLE views) keeps running --
+  -- and swaps only :drawWidescreen for the suite's page, laid out exactly as
+  -- the Gen 1 page above.  Gold has no LEFT/RIGHT turn back to the START menu
+  -- (its START screen has no paging), so the footer does not advertise one.
+
+  function M.newGen2(game, opts)
+    local self = builtin().new(game, opts)
+    self.__g9gui = true
+    self.__t = 0
+    -- the START menu's own rows, for the shared left rail (Gold arm).
+    -- Shell.startRows skips the POKeMON row, so the rail is the START screen's
+    -- rows minus this page's own -- exactly the Gen 1 arrangement.
+    self.__rows = Shell.startRows(game, Strings("POK\xc3\xa9MON"), 2)
+    self.__partyRow = Shell.partyRow(self.__rows, Strings("POK\xc3\xa9MON"))
+    -- tick an animation counter; the engine's own update (cursor, submenu,
+    -- switch/softboiled, item targeting) is otherwise untouched.
+    local baseUpdate = self.update
+    self.update = function(s, dt)
+      s.__t = (s.__t or 0) + 1
+      if M.pageToMenu2(s) then return end
+      if baseUpdate then baseUpdate(s, dt) end
+    end
+    Shell.gen2Surface(Theme, self, function(s) M.drawGen2(s) end)
+    -- the summary screen floats over this page and re-draws it beneath itself
+    -- (see ui/summary.lua's Gen 2 arm); this is the page painter it calls.
+    self.__g9guiPage = function(s) M.drawGen2(s) end
+    return self
+  end
+
+  -- LEFT/RIGHT returns to the START menu, the mirror of that menu's paging into
+  -- here.  Only the START menu's own POKeMON page answers it: the engine marks
+  -- that push with opts.submenu = true (Game2:pushStartMenuItem), and it is the
+  -- only push carrying onCancel = back.  So a battle switch, an item target, a
+  -- PC box or the Day-Care list keeps its shipped LEFT/RIGHT behaviour (which
+  -- is nothing outside a battle grid).  The engine's own B path is reused --
+  -- storeCursor, then onCancel, which pops this page back onto the rail.  The
+  -- cart's white menu fade is gone (ui/start_menu.lua's installNoFade), so both
+  -- the LEFT/RIGHT turn and B land on the rail in the same frame -- the swap is
+  -- seamless.
+  function M.pageToMenu2(self)
+    if not self.wantsSubmenu then return false end
+    -- a popup / swap / medicine result owns the pad while it is up
+    if self.submenu or self.switchFrom or self.softboiledFrom
+        or self.itemResult then
+      return false
+    end
+    if type(self.onCancel) ~= "function" then return false end
+    local game = self.game
+    local input = game and game.input
+    if not (input and (input:wasPressed("left") or input:wasPressed("right")))
+    then return false end
+    if game.stack:top() ~= self then return false end
+    if self.storeCursor then self:storeCursor() end
+    self.onCancel()
+    return true
+  end
+
+  -- the Gen 2 screen's own prompt string, resolved through Strings when the
+  -- engine stored a builtin key rather than literal text, then through
+  -- Shell.display so the cart's print-time glyph macros ("Choose a #MON." uses
+  -- "<PK><MN>") reach the screen as the text the tile font would have drawn.
+  local function g2Prompt(self)
+    local p = self.prompt
+    if self.promptIsBuiltin and self.prompt then
+      local ok, s = pcall(Strings, self.prompt)
+      if ok then p = s end
+    end
+    return Shell.display(p)
+  end
+
+  function M.drawGen2(self)
+    local game = self.game
+    local C = Theme.col
+    local background = opt("ui_background") ~= "false"
+    local embellish = opt("ui_embellishment") ~= "false"
+
+    Backdrop.draw(Theme, { w = W, h = H, t = self.__t or 0,
+      background = background, embellishment = embellish })
+
+    local party = self.party or (game.save and game.save.party) or {}
+    local index = math.min(math.max(1, self.index or 1), math.max(1, #party))
+
+    Shell.top(Theme, game, {
+      title = "POK\xc3\xa9MON",
+      right = ("PARTY %d/%d"):format(#party, 6),
+      caption = g2Prompt(self),
+      money = Shell.money(game),
+      embellish = embellish,
+    })
+
+    Shell.rows(Theme, game, {
+      items = self.__rows, active = self.__partyRow, t = self.__t or 0,
+      w = 158, labelPad = 32,
+    })
+
+    Roster.draw(Theme, game, {
+      x = Shell.ROSTER_X, y = Shell.ROSTER_Y, w = Shell.ROSTER_W,
+      rowH = Shell.ROW_H, headerH = Shell.HEADER_H,
+      party = party, index = index, focus = true,
+      t = self.__t or 0, gen = 2, mode = opt("ui_portraits"),
+      embellish = embellish, logic = self, portraits = Portraits,
+    })
+
+    -- the switch / softboiled source row keeps a hollow marker
+    local from = self.switchFrom or self.softboiledFrom
+    if from and from ~= index and party[from] then
+      local _, ry = Roster.rowRect({ x = Shell.ROSTER_X, y = Shell.ROSTER_Y,
+        w = Shell.ROSTER_W, rowH = Shell.ROW_H, headerH = Shell.HEADER_H }, from)
+      Theme.set(C.accentDim)
+      Theme.rect("line", Shell.ROSTER_X + 2.5, ry + 11.5, 22, 22, 4)
+    end
+
+    -- Gold's field submenu lives at self.submenu {items,index}; the shared
+    -- popup draws the same {label} rows either generation.
+    local sm = self.submenu
+    if sm and sm.items then
+      local _, ry = Roster.rowRect({ x = Shell.ROSTER_X, y = Shell.ROSTER_Y,
+        w = Shell.ROSTER_W, rowH = Shell.ROW_H, headerH = Shell.HEADER_H },
+        index)
+      drawSubmenu(self, game, sm.items, sm.index or 1, ry)
+    end
+
+    local hints = {
+      { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
+      { key = "A", text = "OK" },
+    }
+    -- advertise the LEFT/RIGHT turn back to the START menu only on the page
+    -- that menu opened (a battle or item party menu has no menu behind it)
+    if self.wantsSubmenu then
       hints[#hints + 1] = { key = "\xe2\x86\x90\xe2\x86\x92", text = "MENU" }
     end
     hints[#hints + 1] = { key = "B", text = "BACK" }

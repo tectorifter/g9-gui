@@ -19,6 +19,11 @@ return function(mod, ctx)
   local Builtin = require("src.mods.ManagerState")
   local Strings = require("src.core.Strings")
 
+  -- Gold arm: ManagerState is registered under the SAME id on both
+  -- generations (src/ui/Screens.lua's BUILTIN table), so the Gen 2 arm is
+  -- chosen by ctx.gen and only the surface/drawing changes.
+  local Gen2 = ctx.gen == 2
+
   local W, H = Shell.W, Shell.H
   local MARGIN = Shell.MARGIN
   local ROW = 30
@@ -28,10 +33,122 @@ return function(mod, ctx)
 
   local TABS = { "MODS", "PROFILES", "ERRORS" }
 
+  -- ------------------------------------------------------------------ errors
+  -- The screens that show the manager's error list: the ERRORS tab of the mod
+  -- list, and the per-mod ERRORS page a detail screen opens.  Both get one
+  -- actionable row the engine does not have: the export below.
+  local function isErrorScreen(self)
+    if self.screen == "errors" then return true end
+    return self.screen == "list" and self.tab == 3
+  end
+
+  local function engineVersion()
+    local ok, V = pcall(require, "src.core.Version")
+    if ok and type(V) == "table" then return tostring(V.engine) end
+    return "unknown"
+  end
+
+  local function gameVersion()
+    local ok, GV = pcall(require, "src.core.GameVersion")
+    if ok and type(GV) == "table" and GV.get then
+      local ok2, v = pcall(GV.get)
+      if ok2 and v ~= nil then return tostring(v) end
+    end
+    return "unknown"
+  end
+
+  -- The WHOLE log, not the manager's 16-char display wrapping: every per-mod
+  -- failure and skip reason, then the loader's own runtime error feed verbatim.
+  -- The manager's ERRORS page can only show a handful of wrapped lines at
+  -- once, which is why this matters when there are many.
+  function M.errorLogText(self)
+    local status = self.status or {}
+    local available = status.available or {}
+    local errors = status.errors or {}
+    local loaded, problems = 0, {}
+    for _, m in ipairs(available) do
+      if m.state == "loaded" then loaded = loaded + 1 end
+      if m.error or m.note or (m.enabled and m.state ~= "loaded") then
+        problems[#problems + 1] = m
+      end
+    end
+
+    local out = {}
+    local function put(line) out[#out + 1] = line or "" end
+    put("g9-gui -- mod manager error log")
+    put("generated : " .. os.date("%Y-%m-%d %H:%M:%S"))
+    put("game ver  : " .. gameVersion())
+    put("engine ver: " .. engineVersion())
+    put(("mods      : %d installed, %d loaded, %d with problems, %d log entries")
+      :format(#available, loaded, #problems, #errors))
+
+    put("")
+    put(("=== RUNTIME & LOAD ERRORS (%d) ==="):format(#errors))
+    if #errors == 0 then
+      put("(none)")
+    else
+      for i = 1, #errors do put(("%d. %s"):format(i, tostring(errors[i]))) end
+    end
+
+    put("")
+    put(("=== MODS WITH PROBLEMS (%d) ==="):format(#problems))
+    if #problems == 0 then
+      put("(none)")
+    else
+      for _, m in ipairs(problems) do
+        put(("%s  %s  [%s]  %s"):format(tostring(m.id),
+          tostring(m.version or "?"), tostring(m.state or "?"),
+          m.enabled and "enabled" or "disabled"))
+        if m.error then put("    error: " .. tostring(m.error)) end
+        if m.note then put("    note : " .. tostring(m.note)) end
+      end
+    end
+
+    put("")
+    put("=== END ===")
+    return table.concat(out, "\n") .. "\n"
+  end
+
+  -- Write it to a real .txt.  The mod sandbox cannot name a file at all, and
+  -- mod.storage only produces .lua/.bin files under dot-free keys, so the
+  -- write goes through an engine module (CacheFs), which runs in the engine's
+  -- own environment where love/io are the real ones.  CacheFs routes to the
+  -- save directory, or to the game folder itself in a portable install.
+  function M.exportLog(self)
+    local name = "g9-gui-error-log.txt"
+    local text = M.errorLogText(self)
+    local called, wrote = pcall(function()
+      return require("src.import.CacheFs").write(name, text)
+    end)
+    if called and wrote then
+      self:notify("SAVED " .. name)
+    else
+      self:notify("EXPORT FAILED")
+    end
+  end
+
   function M.uiSize() return W, H end
   M.isWideBattleLayout = Shell.wide
   function M.wantsFillScale(self) return Shell.wide(self) end
   function M.sgbPalettes() return {} end
+
+  -- The error screens carry one extra, actionable row.  Wrapping
+  -- rowsForScreen (rather than only decorating draw) keeps the cursor,
+  -- focusedRow and activate() all seeing it.  Shared by both generations --
+  -- the manager itself is generation-agnostic.
+  local function wrapRows(self)
+    local baseRows = self.rowsForScreen
+    if type(baseRows) ~= "function" then return end
+    self.rowsForScreen = function(s)
+      local rows = baseRows(s) or {}
+      if not isErrorScreen(s) then return rows end
+      -- a fresh copy: the base list is never mutated
+      local out = { { label = Strings("EXPORT LOG.."),
+        action = function() M.exportLog(s) end } }
+      for i = 1, #rows do out[i + 1] = rows[i] end
+      return out
+    end
+  end
 
   function M.decorate(self)
     if type(self) ~= "table" then return self end
@@ -49,10 +166,32 @@ return function(mod, ctx)
       baseUpdate(s, dt)
     end
     self.draw = function(s) M.draw(s) end
+    wrapRows(self)
     return self
   end
 
-  function M.new(game)
+  -- Gold's manager takes no uiSize(): it answers drawsWidescreen and paints
+  -- the whole window, so the SAME page draws there with only its surface
+  -- contract swapped (ui/options.lua's note has the why).
+  function M.decorateGen2(self)
+    if type(self) ~= "table" then return self end
+    self.__g9gui = true
+    self.isOpaque = true
+    self.__t = 0
+    Shell.gen2Surface(Theme, self, function(s) M.draw(s) end)
+    local baseUpdate = self.update
+    self.update = function(s, dt)
+      s.__t = (s.__t or 0) + 1
+      baseUpdate(s, dt)
+    end
+    wrapRows(self)
+    return self
+  end
+
+  function M.new(game, opts)
+    if Gen2 then
+      return M.decorateGen2(Builtin.new(game, opts))
+    end
     return M.decorate(Builtin.new(game))
   end
 
