@@ -36,6 +36,10 @@ return function(mod, ctx)
     ctx.Roster, ctx.Portraits
   local Shell = ctx.Shell
   local opt = ctx.opt
+  local on = ctx.on
+  -- The party-HP sentinel (ui/hp_guard.lua).  Optional; nil means the page
+  -- simply browses without it.
+  local HPGuard = ctx.HPGuard
 
   local M = {}
   local Gen2 = ctx.gen == 2
@@ -60,6 +64,8 @@ return function(mod, ctx)
     [Strings("OPTION")] = "Adjust game settings.",
     [Strings("MODS")] = "Manage installed mods.",
     [Strings("QUIT")] = "Return to the main menu.",
+    -- the PC ROW option's own synthetic row (see M.openPc)
+    [Shell.PC_ROW_LABEL] = "Access the POK\xc3\xa9MON storage system.",
   }
 
   local function badges(game)
@@ -161,20 +167,21 @@ return function(mod, ctx)
     -- instead of re-implementing it.
     local partyLabel = Strings("POK\xc3\xa9MON")
     local items = menu.items or {}
+    -- The engine's FULL row list (row table -> its original 1-based index),
+    -- captured before the POKeMON row is hidden.  The cursor memory is written
+    -- back in these units, so this must be the list StartMenu.new built.
+    local fullOf = {}
+    for i, item in ipairs(items) do fullOf[item] = i end
     local partyRow
     for i, item in ipairs(items) do
       if item.label == partyLabel then partyRow = i break end
     end
-    local fullRow = {}
     if partyRow then
       menu.__partyItem = table.remove(items, partyRow)
       -- game.startMenuIndex counts the FULL row list -- the engine's own
       -- wrapper wrote it, and its StartMenu.new has already used it to place
       -- the cursor -- so map it onto the reduced list (keeping the cursor on
       -- the row it was actually on) and keep the inverse map to write back.
-      for i = 1, #items + 1 do
-        fullRow[i] = i >= partyRow and i + 1 or i
-      end
       local full = game.startMenuIndex
       if type(full) == "number" then
         if full > partyRow then full = full - 1
@@ -182,6 +189,37 @@ return function(mod, ctx)
         menu.index = math.max(1, math.min(full, math.max(1, #items)))
       end
       if menu.clampScroll then pcall(menu.clampScroll, menu) end
+    end
+
+    -- Optional synthetic PC row (the ui_pc_row option): A opens the POKeMON
+    -- storage system, exactly as the PC in a POKeMON CENTER does.  It sits
+    -- right after the bag row and, like QUIT, carries no keepOpen -- the
+    -- generic Menu:activate has already popped this menu by the time its
+    -- onSelect runs, so the PC's own "turned on the PC" beat plays over the
+    -- overworld rather than under the START rail.  game.__g9guiPcRowAfter
+    -- records the label it follows so the POKeMON page's rail (Shell.startRows)
+    -- mirrors this list; nil means the option is off.
+    local pcAfter, pcItem
+    if on("ui_pc_row") then
+      pcAfter = Strings("ITEM")
+      local at = #items
+      for i, item in ipairs(items) do
+        if item.label == pcAfter then at = i break end
+      end
+      pcItem = { label = Shell.PC_ROW_LABEL,
+        onSelect = function() M.openPc(game) end }
+      table.insert(items, at + 1, pcItem)
+      if menu.index and menu.index > at then menu.index = menu.index + 1 end
+      if menu.clampScroll then pcall(menu.clampScroll, menu) end
+    end
+    game.__g9guiPcRowAfter = pcAfter
+
+    -- inverse map (reduced -> full) for the cursor write-back.  The POKeMON
+    -- row's slot is skipped; the synthetic PC row answers false, so no
+    -- full-row cursor is written for it (there is none to remember).
+    local fullRow = {}
+    for i, item in ipairs(items) do
+      fullRow[i] = (item == pcItem) and false or fullOf[item]
     end
     menu.__fullRow = fullRow
     menu.__partyRow = nil
@@ -194,15 +232,33 @@ return function(mod, ctx)
     local baseUpdate = menu.update
     menu.update = function(self, dt)
       self.__t = (self.__t or 0) + 1
+      -- the HP sentinel: compare the party against the pre-turn baseline
+      -- before anything else this frame reads or writes it
+      if HPGuard then HPGuard.tick(game, self) end
       -- LEFT/RIGHT page between this menu and the POKeMON screen.  They are
       -- free keys here: the engine's Menu update reads only up/down/a/b/start,
       -- and the START menu's own pad mask has no direction but UP/DOWN.
-      if M.pageToParty(self) then return end
+      if M.pageToParty(self) then
+        -- The turn has just built the POKeMON page.  Tick again now so a
+        -- write made DURING that construction is caught on this very frame,
+        -- rather than waiting a frame for the page that is now on top.
+        if HPGuard then HPGuard.tick(game, self) end
+        return
+      end
       baseUpdate(self, dt)
       -- write the cursor back in FULL-row units, so the next StartMenu.new
       -- finds it where the player left it even though a row is hidden
       local map = self.__fullRow
       if map and map[self.index] then game.startMenuIndex = map[self.index] end
+    end
+
+    -- The HP sentinel (ui/hp_guard.lua): the START page is a pure view of the
+    -- party, so it is guard-eligible, and its baseline is taken HERE -- before
+    -- any page turn -- so the POKeMON page reached by LEFT/RIGHT is compared
+    -- against the values as they were before the turn.
+    menu.__g9guard = true
+    if HPGuard then
+      HPGuard.keep(game, "START", game.save and game.save.party)
     end
 
     menu.draw = function(self) M.draw(self) end
@@ -221,6 +277,14 @@ return function(mod, ctx)
   -- back through the engine's own POKeMON row path (see M.pageToParty2), and
   -- the cart's white menu fade is dropped entirely (installNoFade) -- without
   -- it the swap flashed the engine's own START screen under a white sheet.
+  --
+  -- The POKeMON row is removed from the rail for the same reason the Gen 1 arm
+  -- removes it: the right column IS the party on this page (M.drawGen2), so a
+  -- rail row that only re-showed it was redundant -- and the POKeMON page's own
+  -- rail has never carried it (Shell.startRows skips it), so the two halves of
+  -- the spread now agree.  Gold's rows carry a stable `value` id, so the row is
+  -- found by id and not by position, and its item object is kept because
+  -- LEFT/RIGHT reuses the engine's own POKeMON entry point.
 
   -- captions keyed by the engine's stable row ids (Gen 2 rows carry a `value`;
   -- Gen 1's are matched by label).
@@ -235,6 +299,9 @@ return function(mod, ctx)
     mods = "Manage installed mods.",
     quit = "Return to the main menu.",
     quitContest = "Quit and be judged.",
+    -- the PC ROW option's own synthetic row, matched by its label (the row
+    -- carries no `value`)
+    PC = "Access the POK\xc3\xa9MON storage system.",
   }
 
   -- A TRUE OVERRIDE of the START menu's own transitions.  Gold runs every
@@ -265,22 +332,154 @@ return function(mod, ctx)
   end
 
   function M.newGen2(game, opts)
-    local menu = builtin().new(game, opts)
+    local cls = builtin()
+    local menu = cls.new(game, opts)
     menu.__g9gui = true
     menu.__t = 0
     -- claim the menu's transitions: no cart menu fade over our page
     installNoFade(game)
+    -- Remove the POKeMON row from the rail (the item object is kept for
+    -- LEFT/RIGHT; see the arm's note above).  Gold's list lives at menu.list
+    -- (Chrome.List) with its OWN array of the same entry tables, so the removal
+    -- is mirrored there and the row window is clamped back in.
+    local items = menu.items or {}
+    local list = menu.list
+    -- The engine's FULL row list (row table -> original index), captured before
+    -- the POKeMON row is hidden: Gold's cursor memory is written back in these
+    -- units (M.rememberIndex) ahead of the reduced list.
+    local fullOf = {}
+    for i, item in ipairs(items) do fullOf[item] = i end
+    local at
+    for i, item in ipairs(items) do
+      if item.value == "pokemon" then at = i break end
+    end
+    if at then
+      menu.__partyItem = table.remove(items, at)
+      -- The engine placed the cursor with its remembered start-menu index
+      -- computed on the FULL row list, so re-apply the mapping here, exactly as
+      -- the Gen 1 arm does with game.startMenuIndex -- otherwise the hidden row
+      -- shifts every row below it.  Gold keeps that memory on the CLASS
+      -- (StartMenu.lastIndex), not on the game, which is what M.rememberIndex
+      -- writes back.
+      if list then
+        if list.items and list.items ~= items then table.remove(list.items, at) end
+        local n = #(list.items or items)
+        list.rows = math.min(list.rows or n, math.max(1, n))
+        local full = cls.lastIndex
+        if type(full) == "number" then
+          if full > at then full = full - 1
+          elseif full == at then full = math.min(at, #items) end
+        else
+          full = list.index
+        end
+        list.index = math.max(1, math.min(full or 1, math.max(1, n)))
+      end
+    end
+
+    -- Optional synthetic PC row (the ui_pc_row option): A opens the POKeMON
+    -- storage system.  Gold's StartMenu:choose does NOT pop a mod row (it just
+    -- plays the click and calls onSelect -- src/ui/gen2/StartMenu.lua), so the
+    -- row closes this menu itself through M.openPcFrom, the way every built-in
+    -- Gold row's own path leaves it.  It is inserted after PACK in BOTH lists --
+    -- Chrome.List copied the array at construction -- and the cursor window is
+    -- re-clamped.  game.__g9guiPcRowAfter records the label the POKeMON page's
+    -- rail (Shell.startRows) must follow; nil means the option is off.
+    local pcAfter, pcItem
+    if on("ui_pc_row") then
+      pcAfter = Strings("PACK")
+      local idx
+      for i, item in ipairs(items) do
+        if item.value == "pack" or item.label == pcAfter then idx = i break end
+      end
+      idx = idx or #items
+      pcItem = { label = Shell.PC_ROW_LABEL,
+        onSelect = function(g) return M.openPcFrom(menu, g) end }
+      table.insert(items, idx + 1, pcItem)
+      if list then
+        if list.items ~= items then table.insert(list.items, idx + 1, pcItem) end
+        if list.index and list.index > idx then list.index = list.index + 1 end
+        list.rows = math.min(#(list.items or items), 8)
+        if list.ensureVisible then pcall(list.ensureVisible, list) end
+      end
+    end
+    game.__g9guiPcRowAfter = pcAfter
+
+    -- inverse map (reduced -> full) for the cursor write-back.  The synthetic
+    -- PC row answers false (it has no full-row cursor of its own).
+    local fullRow = {}
+    for i, item in ipairs(items) do
+      fullRow[i] = (item == pcItem) and false or fullOf[item]
+    end
+    menu.__fullRow = fullRow
     -- tick an animation counter and add LEFT/RIGHT paging; the engine's own
     -- update (cursor, scroll, the QUIT confirm, row unlocks) is otherwise
     -- untouched.
     local baseUpdate = menu.update
     menu.update = function(self, dt)
       self.__t = (self.__t or 0) + 1
-      if M.pageToParty2(self) then return end
+      if HPGuard then HPGuard.tick(game, self) end
+      if M.pageToParty2(self) then
+        if HPGuard then HPGuard.tick(game, self) end
+        return
+      end
+      -- Gold's own QUIT confirm lives in the engine (self.phase, self.confirmChoice,
+      -- up/down/a/b -- src/ui/gen2/StartMenu.lua); M.drawConfirm draws it as a
+      -- modern panel.  LEFT/RIGHT answer it too, and being the layout's own axis
+      -- they are DIRECTIONAL: YES is the LEFT button there, NO the right.
+      -- UP/DOWN still toggle inside the engine's update below.
+      if self.phase == "confirm" then
+        local input = self.game and self.game.input
+        if input then
+          if input:wasPressed("left") then self.confirmChoice = 1
+          elseif input:wasPressed("right") then self.confirmChoice = 2 end
+        end
+      end
       baseUpdate(self, dt)
+      M.rememberIndex(self)
+    end
+    -- SAVE is the last classic screen in this menu's Gold tree: the cart's
+    -- StartMenu:choose hands `save` to Game2:pushStartMenuItem, which pushes
+    -- Gen2SaveMenu -- the classic 160x144 save screen with its own yes/no.
+    -- Re-point just that id at ui/dialogs.lua's modern modals, the way the Gen 1
+    -- arm does through M.wrapItems on Red, so both generations save through the
+    -- same SAVE DATA card, "Now saving..." beat and "saved the game!" notice
+    -- (and, since ui/dialogs.lua's card floats, with the menu still visible
+    -- around it on Gold too).  The menu's own update, cursor memory and every
+    -- other row are untouched.
+    local baseChoose = menu.choose
+    if type(baseChoose) == "function" then
+      menu.choose = function(self, id, index)
+        if id == "save" then M.startSave(self.game, self) return end
+        return baseChoose(self, id, index)
+      end
     end
     Shell.gen2Surface(Theme, menu, function(self) M.drawGen2(self) end)
+    -- The HP sentinel (ui/hp_guard.lua): Gold's START page is a pure view of
+    -- the party, so it is guard-eligible, and the baseline is taken here --
+    -- before any page turn -- exactly as the Gen 1 arm does.
+    menu.__g9guard = true
+    if HPGuard then
+      HPGuard.keep(game, "START", game.save and game.save.party)
+    end
+    -- The page's own repaint hook, so a dialog that FLOATS over this menu can
+    -- draw the menu beneath its dimmed panel (Game2 hands the window to the top
+    -- widescreen state, so nothing else would -- see ui/dialogs.lua's paintBack
+    -- and ui/summary.lua's partyPageUnder).
+    menu.__g9guiPage = function(s) M.drawGen2(s) end
     return menu
+  end
+
+  -- Keep Gold's cursor memory in FULL-row units, so the next opening finds the
+  -- cursor on the row the player actually left it on even though a row is
+  -- hidden -- the same job game.startMenuIndex does for the Gen 1 arm.  Gold's
+  -- engine keeps its own module-level StartMenu.lastIndex, and its choose() /
+  -- close() write the REDUCED index into it; this runs after every baseUpdate
+  -- (and in M.pageToParty2), so the mapped value is the one that survives.
+  function M.rememberIndex(self)
+    local map, list = self.__fullRow, self.list
+    if not (map and list and map[list.index]) then return end
+    local cls = builtin()
+    cls.lastIndex = map[list.index]
   end
 
   -- LEFT/RIGHT opens the POKeMON page exactly as the engine's own POKeMON row
@@ -301,14 +500,19 @@ return function(mod, ctx)
       return false
     end
     if game.stack:top() ~= self then return false end
-    -- find the engine's POKeMON row by its stable id, never by position: a mod
-    -- may have hidden or reordered the rows.
-    local at
-    for i, item in ipairs(self.items or {}) do
-      if item.value == "pokemon" then at = i break end
+    -- The row is not in the rail any more (M.newGen2), so the engine's id is
+    -- chosen directly: choose() needs no item for that -- it plays the click,
+    -- remembers the cursor, then calls onChoose -> Game2:openStartMenuItem.  The
+    -- stored row object is only the gate: no row (a mod removed it) means no
+    -- paging, which is what the Gen 1 arm answers too.
+    if not self.__partyItem then return false end
+    -- Name the direction the sentinel is watching (Gold's page turn is the
+    -- same pure view change as Gen 1's -- see M.pageToParty).
+    if HPGuard then
+      HPGuard.keep(game, "START->POKeMON", game.save and game.save.party)
     end
-    if not at then return false end
-    self:choose("pokemon", at)
+    self:choose("pokemon")
+    M.rememberIndex(self)
     return true
   end
 
@@ -427,6 +631,11 @@ return function(mod, ctx)
     end
     local item = self.__partyItem
     if not (item and item.onSelect) then return false end
+    -- Name the direction the sentinel is now watching, and make sure it is
+    -- armed even if this page somehow never was (both are no-ops otherwise).
+    if HPGuard then
+      HPGuard.keep(game, "START->POKeMON", game.save and game.save.party)
+    end
     if game.stack:top() == self then game.stack:pop() end
     -- the party page reads this to know LEFT/RIGHT belongs to this menu
     game.__g9guiPartyFromStart = true
@@ -440,6 +649,42 @@ return function(mod, ctx)
       end
     end
     return true
+  end
+
+  -- ------------------------------------------------------------------ pc row
+
+  -- The synthetic PC row's action (the ui_pc_row option): open the POKeMON
+  -- storage system -- the same session the PC standing in a POKeMON CENTER
+  -- opens, so this mod's own PC pages take it over (ui/pc.lua).  Gen 1 pushes
+  -- it from OverworldState:openPC (whose inline menu installOpenPc marks and
+  -- dresses); Gold pushes Gen2CenterPcMenu through World:openPc, one of
+  -- G2_SCREENS.  A build with neither entry point only logs: the row is a
+  -- convenience, never a crash.
+  function M.openPc(game)
+    local target = Gen2 and (game and game.world) or (game and game.overworld)
+    if type(target) ~= "table" then
+      mod.log:warn("g9-gui: no overworld to open the PC from")
+      return
+    end
+    local method = Gen2 and target.openPc or target.openPC
+    if type(method) ~= "function" then
+      mod.log:warn("g9-gui: this build has no PC entry point")
+      return
+    end
+    local ok, err = pcall(method, target, Gen2 and {} or nil)
+    if not ok then
+      mod.log:warn("g9-gui: could not open the PC: "
+        .. tostring(err):gsub("%%", "%%%%"))
+    end
+  end
+
+  -- Gold: the mod row closes the START menu itself (see M.newGen2), so the
+  -- PC's own beat lands on the overworld rather than under the rail.
+  function M.openPcFrom(menu, game)
+    if menu and type(menu.close) == "function" then
+      pcall(menu.close, menu)
+    end
+    M.openPc(game)
   end
 
   -- ------------------------------------------------------------- save & quit

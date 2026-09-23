@@ -250,8 +250,14 @@ return function(mod, ctx)
         or (page == TAB_ABILITY)
         and ("Press A to swap the ability slot (" .. ABILITY_COST .. ").")
         or ("Press A to toggle the hidden ability (" .. HIDDEN_COST .. ").")
-      Theme.text(Theme.fit(message, F, TABLE_W),
-        MARGIN, centerY(NUDGE_Y, NUDGE_H, F), F, "left", C.inkDim)
+      -- the strip is one line: a long action hint steps down a rung rather
+      -- than being cut to a half-sentence
+      local mf = F
+      local fonts = Theme.fonts(game)
+      if Theme.w(message, mf) > TABLE_W then mf = fonts.small end
+      if Theme.w(message, mf) > TABLE_W then mf = fonts.tiny end
+      Theme.text(Theme.fit(message, mf, TABLE_W),
+        MARGIN, centerY(NUDGE_Y, NUDGE_H, mf), mf, "left", C.inkDim)
     end
   end
 
@@ -635,7 +641,14 @@ return function(mod, ctx)
         baseUpdate(s, dt)
       end
     end
-    state.draw = function(s) M.draw(s) end
+    -- Gen 1 draws the page through this instance's OWN :draw (the renderer
+    -- blits the 540x360 surface this screen answers :uiSize() with).  Gold has
+    -- no such surface: Shell.gen2Surface already installed :drawWidescreen AND
+    -- a no-op :draw (a state the size of a page must not also paint in the
+    -- stack pass Game2 runs under a pushed TextBox), so do not clobber it.
+    if not Gen2 then
+      state.draw = function(s) M.draw(s) end
+    end
     return state
   end
 

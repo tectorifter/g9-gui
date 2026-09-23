@@ -9,11 +9,14 @@
 --
 -- WHAT SURVIVES BY CONSTRUCTION.  This mod only ever replaces an INSTANCE's
 -- draw and wraps its update, so national_dex's instance-level state and its
--- update wrapper keep running underneath: the 1025-row roster, the SELECT
--- view modes (num / A-Z / SEEN) that reorder self.items, START's search, the
--- entry page's DOWN/UP strip and its LEFT/RIGHT form cycling all work exactly
--- as they do without this mod.  The only thing that changes is the page the
--- player reads them on.
+-- update wrapper keep running underneath: the 1025-row roster, START's search,
+-- the entry page's DOWN/UP strip and its LEFT/RIGHT form cycling all work
+-- exactly as they do without this mod.  The only thing that changes is the page
+-- the player reads them on -- and ROUND 315's row order: the suite's listing is
+-- the whole roster by NUMBER, 001 upward to the last entry, with SELECT masked
+-- so the peer's num / A-Z / SEEN view modes cannot reorder it (see
+-- ui/pokedex.lua's "the number order").  The peer's own view-mode state still
+-- exists underneath; nothing this page draws consults it.
 --
 -- WHAT THIS FILE ADDS.  Two things the composite needs and neither mod can
 -- supply alone:
@@ -151,38 +154,12 @@ return function(mod, ctx)
     return (form:gsub("_", " "))
   end
 
-  M.TAG = {
-    num = "SORT: NUM", alpha = "SORT: A-Z", seen = "SORT: SEEN",
-  }
-
-  -- Which view the listing is in, from the item array alone.  national_dex
-  -- keeps its `mode` in a closure local and does not expose it, so it is read
-  -- back off the shape: the numerical view is the constructor's own array (the
-  -- numbers run 1,2,3...), the alphabetical view is sorted by name (with the
-  -- still-unseen dash rows parked at the end), and anything else is the
-  -- recorded view.  A one-row list reads as numerical, which is what a list
-  -- opened in the default mode is.
-  function M.listingMode(items)
-    if type(items) ~= "table" or #items == 0 then return nil end
-    local sequential = true
-    for i = 1, #items do
-      local num = tonumber(tostring(items[i].num or ""))
-      if num ~= i then sequential = false break end
-    end
-    if sequential then return "num" end
-    local previous, sorted = nil, true
-    for i = 1, #items do
-      local item = items[i]
-      local name = type(item) == "table" and item.name or nil
-      if type(name) == "string" and name ~= "----------" then
-        local key = name:upper()
-        if previous and key < previous then sorted = false break end
-        previous = key
-      end
-    end
-    if sorted then return "alpha" end
-    return "seen"
-  end
+  -- ROUND 315 removed M.TAG and M.listingMode.  They existed to name the
+  -- peer's SELECT view mode from the item array's shape, because the suite's
+  -- listing used to follow that mode and had to say which one was current.
+  -- The listing is now always the number order, 001 to the last entry, with
+  -- SELECT masked out (ui/pokedex.lua's "the number order"), so there is no
+  -- mode to detect and nothing to name.
 
   -- Type display names come through the engine's chart so they read as the
   -- cart spells them (FIRE, not the mod's own id).

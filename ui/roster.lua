@@ -117,6 +117,13 @@ return function(mod)
   -- id (burn/sleep/...), which the shared src.battle.Status maps through
   -- GEN2_ID_ALIASES; Gen 1 answers straight off data.statuses.
   function R.status(game, mon)
+    -- An EGG is not a fainted Pokemon on any screen, whatever its HP reads.
+    -- g9-battle-engine carries every egg at 0 HP so no battle path can send it
+    -- out (stats/egg_normalize.lua) -- that zero is a BATTLE-TEAM rule, not a
+    -- status the player should ever see printed beside the egg.  It gets no
+    -- chip at all, so the party roster and the summary's STATUS row both read a
+    -- plain egg instead of a corpse.
+    if mon.isEgg then return nil end
     if (mon.hp or 0) <= 0 then return "FNT", "bad" end
     if not mon.status then return nil end
     local label
@@ -316,8 +323,9 @@ return function(mod)
           key == "warn" and C.void or C.white)
       end
 
-      -- a fainted mon's row is washed dark
-      if (mon.hp or 0) <= 0 then
+      -- a fainted mon's row is washed dark -- but an egg is not fainted (see
+      -- R.status), so its row keeps full contrast
+      if (mon.hp or 0) <= 0 and not mon.isEgg then
         Theme.set(C.black, 0.34)
         Theme.rect("fill", x, y, w, rh, 6)
       end

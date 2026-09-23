@@ -315,33 +315,14 @@ return function(mod, ctx)
     end
   end
 
-  -- The CONTINUE confirm card: Gold's own Save.summary is the read the cart's
-  -- DisplaySaveInfoOnContinue makes -- its `badges` counts BOTH the Johto and
-  -- the Kanto sets and its `caught` counts the dex -- so the figure here is the
-  -- same one the engine prints, through the same module.
-  local function saveRows2(game, save)
-    local rows = {
-      { Strings("PLAYER"), (save.player and save.player.name) or "GOLD", "ink" },
-      { Strings("BADGES"), " 0", "gold" },
-      { Strings("POK\xc3\xa9DEX"), "  0", "gold" },
-      { Strings("TIME"), "0:00", "gold" },
-    }
-    local ok, summary = pcall(function()
-      return require("src.core.gen2.Save").summary(save)
-    end)
-    if ok and summary then
-      rows[2][2] = ("%2d"):format(summary.badges or 0)
-      rows[3][2] = ("%3d"):format(summary.caught or 0)
-      rows[4][2] = ("%d:%02d"):format(summary.hours or 0, summary.minutes or 0)
-    end
-    return rows
-  end
-
   function M.drawCardGen2(self, game)
     if not Dialogs then return end
     Dialogs.paintCard(self, game, {
       title = Strings("SAVE DATA"),
-      rows = saveRows2(game, self.save or (game and game.save) or {}),
+      -- Dialogs.saveRows reads Gold's own Save.summary when the boot is Gold
+      -- (the same figures the cart's DisplaySaveInfoOnContinue prints), and the
+      -- title screen's LOADED save rather than the live one.
+      rows = Dialogs.saveRows(game, self.save or (game and game.save)),
       hints = {
         { key = "A", text = Strings("CONTINUE") },
         { key = "B", text = Strings("BACK") },
@@ -400,6 +381,9 @@ return function(mod, ctx)
     end
     self.drawsWidescreen = function() return true end
     self.wantsFillScale = function() return true end
+    -- the page is painted by :drawWidescreen; the native boot menu must not
+    -- also paint when Game2 runs stack:draw() (see ui/shell.lua gen2Surface)
+    self.draw = function() end
     self.drawWidescreen = function(s, winW, winH)
       Shell.gen2Page(Theme, s, winW, winH, function() M.drawGen2(s) end)
     end

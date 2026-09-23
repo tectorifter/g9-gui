@@ -81,7 +81,38 @@ return function(mod, ctx)
   end
 
   -- ------------------------------------------------------------------- draw
-  function M.draw(self)
+  -- The six-pocket strip, drawn only on a pocketed Gen 1 bag (ui/bag_util.lua).
+  -- Same language as the Gen 2 PACK's own tabs below: one chip per pocket, the
+  -- active one lit with a gold underline.  Short captions, because six full
+  -- pocket names ("POKe BALLS", "BATTLE ITEMS") do not fit the 540px page.
+  local G1_TAB_H = 24
+  local function tabStrip(captions, activeIdx, F, C)
+    local x = MARGIN
+    for i = 1, #captions do
+      local name = captions[i]
+      local w = Theme.w(name, F.small) + 22
+      local on = i == (activeIdx or 1)
+      Theme.set(on and C.accentDim or C.panelDeep, on and 1 or 0.7)
+      Theme.rect("fill", x, Shell.CONTENT_Y, w, G1_TAB_H, 4)
+      if on then
+        Theme.set(C.accent)
+        Theme.rect("fill", x, Shell.CONTENT_Y + G1_TAB_H - 1, w, 1, 0)
+      end
+      Theme.text(name, x + w * 0.5, Shell.CONTENT_Y + 4, F.small, "center",
+        on and C.accent or C.inkFaint)
+      x = x + w + 6
+    end
+    return x
+  end
+
+  -- `o` overrides the page's own labels, so the same painter can serve a
+  -- DIFFERENT owner of a bag-shaped list.  The mart's SELL list is the bag (the
+  -- engine hands it the bag's own rows and SELECT-swap), and on Gold the sell
+  -- flow already opens the modern PACK -- see ui/shop.lua.  Defaults are
+  -- exactly what this page always drew, so the bag itself is unchanged.
+  --   o = { title, right, caption, swapCaption, aHint }
+  function M.drawPage(self, o)
+    o = o or {}
     local game = self.game
     local C = Theme.col
     local background = opt("ui_background") ~= "false"
@@ -111,12 +142,30 @@ return function(mod, ctx)
       }
     end
 
+    -- A pocketed bag (Gen 1, ui/bag_util.lua) gets the six-pocket strip; the
+    -- rows step from 34 to 30 so seven of them still clear the footer rule.
+    local pocketed = self.__g9bag and ctx.BagUtil
+    local sortOpen = pocketed and self.__g9sort or nil
+    local listY, listRow = Shell.CONTENT_Y, 34
+    if pocketed then
+      tabStrip(ctx.BagUtil.tabCaptions(), self.__g9pocket,
+        Theme.fonts(game), C)
+      listY, listRow = Shell.CONTENT_Y + G1_TAB_H + 8, 30
+    end
+
+    local caption
+    if sortOpen then
+      caption = "Sort the bag by name or by count."
+    elseif self.swapIndex then
+      caption = o.swapCaption or "Choose another item to swap with."
+    else
+      caption = o.caption or "Use or toss an item."
+    end
+
     Shell.top(Theme, game, {
-      title = titleText(self.title),
-      right = ("%d HELD"):format(math.max(0, held)),
-      caption = self.swapIndex
-        and "Choose another item to swap with."
-        or "Use or toss an item.",
+      title = o.title or titleText(self.title),
+      right = o.right or ("%d HELD"):format(math.max(0, held)),
+      caption = caption,
       money = Shell.money(game),
       embellish = embellish,
     })
@@ -127,21 +176,53 @@ return function(mod, ctx)
       scroll = 0,
       t = self.__t or 0,
       more = scroll + VISIBLE < n,
-      x = MARGIN, y = Shell.CONTENT_Y, w = W - MARGIN * 2,
-      row = 34, labelPad = 44, rightPad = 20,
+      x = MARGIN, y = listY, w = W - MARGIN * 2,
+      row = listRow, labelPad = 44, rightPad = 20,
     })
 
+    -- the sort prompt rides over the page as the suite's own card, so it reads
+    -- as part of the design instead of pushing the engine's classic menu
+    if sortOpen then
+      local rowsOut = {}
+      for i, label in ipairs(ctx.BagUtil.SORT_LABELS) do
+        rowsOut[i] = { text = label }
+      end
+      local pocket = ctx.BagUtil.POCKETS[self.__g9pocket]
+      Shell.card(Theme, game, {
+        w = 340,
+        title = "SORT THE BAG",
+        right = pocket and pocket.label or nil,
+        rows = rowsOut,
+        index = sortOpen.index,
+        t = self.__t or 0,
+        hints = {
+          { key = "\xe2\x86\x91\xe2\x86\x93", text = "CHOOSE" },
+          { key = "A", text = "SORT" },
+          { key = "B", text = "BACK" },
+        },
+      })
+    end
+
     Shell.footer(Theme, game, {
-      hints = {
+      hints = o.hints or (pocketed and {
+        { key = "\xe2\x86\x90\xe2\x86\x92", text = "POCKET" },
+        { key = "A", text = o.aHint or "USE" },
+        { key = "SELECT", text = "SWAP" },
+        { key = "TAB", text = "SORT" },
+        { key = "B", text = "BACK" },
+      } or {
         { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
-        { key = "A", text = "USE" },
+        { key = "A", text = o.aHint or "USE" },
         { key = "SELECT", text = "SWAP" },
         { key = "B", text = "BACK" },
-      },
+      }),
+      gap = o.gap or 24,
     })
 
     Theme.set(C.white)
   end
+
+  function M.draw(self) return M.drawPage(self) end
 
   -- ---------------------------------------------------------------- install
   -- The registry entry covers Screens.push("BagMenu"); the same decorate also
@@ -149,7 +230,15 @@ return function(mod, ctx)
   -- (Screens.push in StartMenu and BattleState), so registering is enough.
   function M.new(game, opts)
     if Gen2 then return M.newGen2(game, opts) end
-    return M.decorate(Builtin.new(game, opts), game)
+    local list = Builtin.new(game, opts)
+    -- Gen 1 gets the six auto-sorted pockets (ui/bag_util.lua).  A bag opened
+    -- over a battle is left alone: the wide battle owns the surface there, so
+    -- the engine's classic bag keeps its flat rows.
+    local BagUtil = ctx.BagUtil
+    if BagUtil and BagUtil.enabled and not Shell.inBattle(game) then
+      list = BagUtil.decorateBagList(list, game, opts)
+    end
+    return M.decorate(list, game)
   end
 
   -- ============================================================ Gen 2 (PACK)
@@ -249,9 +338,11 @@ return function(mod, ctx)
     end
     local ly = y + (opts.title and 40 or 18)
     for _, line in ipairs(lines) do
-      Theme.text(Theme.fit(line, F.small, w - 28), x + w * 0.5, ly, F.small,
-        "center", C.ink)
-      ly = ly + 22
+      -- a prompt longer than the card wraps instead of being cut
+      for _, sub in ipairs(Theme.wrap(line, F.small, w - 28)) do
+        Theme.text(sub, x + w * 0.5, ly, F.small, "center", C.ink)
+        ly = ly + 22
+      end
     end
     if rows then
       ly = ly + 4
@@ -281,7 +372,13 @@ return function(mod, ctx)
     return self
   end
 
-  function M.drawGen2(self)
+  -- `o` overrides the header caption / title and the A hint, so the SAME page
+  -- can be painted for a different owner of a pack: the Gold mart's SELL phase
+  -- holds the modern pack and draws it here (see ui/shop.lua), exactly as the
+  -- item PC's DEPOSIT phase does.  Defaults are what this page always drew.
+  --   o = { title, caption, aHint }
+  function M.drawGen2(self, o)
+    o = o or {}
     local game = self.game
     local C = Theme.col
     local F = Theme.fonts(game)
@@ -306,9 +403,9 @@ return function(mod, ctx)
     end
 
     Shell.top(Theme, game, {
-      title = g2pocketName(self),
+      title = o.title or g2pocketName(self),
       right = ("%d ITEMS"):format(n),
-      caption = desc or "Use or toss an item.",
+      caption = o.caption or desc or "Use or toss an item.",
       money = Shell.money(game),
       embellish = embellish,
     })
@@ -329,10 +426,11 @@ return function(mod, ctx)
     Shell.footer(Theme, game, {
       hints = {
         { key = "\xe2\x86\x90\xe2\x86\x92", text = "POCKET" },
-        { key = "A", text = "USE" },
+        { key = "A", text = o.aHint or "USE" },
         { key = "SELECT", text = "MOVE" },
         { key = "B", text = "BACK" },
       },
+      gap = o.gap or 24,
     })
 
     -- the engine's own overlays, drawn as this suite's popups: a message holds
@@ -407,6 +505,12 @@ return function(mod, ctx)
 
     Theme.set(C.white)
   end
+
+  -- The item PC's DEPOSIT phase holds a Gen2PackMenu instance and draws it
+  -- INSIDE its own page (src/ui/gen2/ItemPcMenu.lua's drawPanel did the same
+  -- with the engine's pack panel), so the Gen 2 page painter is published on
+  -- the shared ctx for ui/pc.lua.  Read lazily there, so load order is free.
+  ctx.Bag = M
 
   return M
 end

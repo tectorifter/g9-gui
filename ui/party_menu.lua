@@ -29,6 +29,9 @@ return function(mod, ctx)
     ctx.Roster, ctx.Portraits
   local Shell = ctx.Shell
   local opt = ctx.opt
+  -- The party-HP sentinel (ui/hp_guard.lua).  Optional; nil means the page
+  -- simply browses without it.
+  local HPGuard = ctx.HPGuard
 
   local M = {}
   local Strings = require("src.core.Strings")
@@ -80,6 +83,8 @@ return function(mod, ctx)
     local baseUpdate = self.update
     self.update = function(s, dt)
       s.__t = (s.__t or 0) + 1
+      -- the HP sentinel: compare the party against the pre-turn baseline
+      if HPGuard then HPGuard.tick(s.game, s) end
       -- LEFT/RIGHT returns to the START menu, the mirror of the START menu's
       -- LEFT/RIGHT paging in here.  Popping first (then onCancel, which is the
       -- engine's own `reopen`) is exactly what the shipped Menu does for a
@@ -88,6 +93,9 @@ return function(mod, ctx)
         local input = s.game and s.game.input
         if input and (input:wasPressed("left") or input:wasPressed("right"))
             and s.game.stack:top() == s then
+          if HPGuard then
+            HPGuard.keep(s.game, "POKeMON->START", s.party)
+          end
           s.game.stack:pop()
           if s.onCancel then s.onCancel() end
           return
@@ -99,6 +107,17 @@ return function(mod, ctx)
     -- POKeMON row is hidden there, so it is hidden here too)
     self.__rows = Shell.startRows(game, Strings("POK\xc3\xa9MON"))
     self.__partyRow = Shell.partyRow(self.__rows, Strings("POK\xc3\xa9MON"))
+    -- The HP sentinel (ui/hp_guard.lua) guards only the FIELD page -- the one
+    -- the START screen pages into.  A battle switch, an item target, a TM/HM
+    -- or evolution-stone "ABLE?" list and the medicine picker are all the
+    -- same engine object but may legitimately move HP, so they carry the
+    -- ineligible flag and the sentinel never second-guesses them.  `keep` is
+    -- a no-op here when the START page already took the pre-turn baseline.
+    self.__g9guard = not (self.battle or self.pickOnly or self.itemUse
+      or self.tmhm or self.evoStone or self.forceSwitch)
+    if HPGuard and self.__g9guard then
+      HPGuard.keep(game, nil, self.party or (game.save and game.save.party))
+    end
     self.draw = function(s) M.draw(s) end
     return self
   end
@@ -235,11 +254,21 @@ return function(mod, ctx)
     -- rows minus this page's own -- exactly the Gen 1 arrangement.
     self.__rows = Shell.startRows(game, Strings("POK\xc3\xa9MON"), 2)
     self.__partyRow = Shell.partyRow(self.__rows, Strings("POK\xc3\xa9MON"))
+    -- The HP sentinel (ui/hp_guard.lua) guards only the field page the START
+    -- menu pages into -- Gold marks that push with opts.submenu = true.  A
+    -- battle switch (battle / battleSubmenu) or a TM/HM list is the same
+    -- engine object but may legitimately move HP, so it is left alone.
+    self.__g9guard = self.wantsSubmenu == true and not self.battle
+      and not self.wantsBattleSubmenu and not self.tmhm
+    if HPGuard and self.__g9guard then
+      HPGuard.keep(game, nil, self.party or (game.save and game.save.party))
+    end
     -- tick an animation counter; the engine's own update (cursor, submenu,
     -- switch/softboiled, item targeting) is otherwise untouched.
     local baseUpdate = self.update
     self.update = function(s, dt)
       s.__t = (s.__t or 0) + 1
+      if HPGuard then HPGuard.tick(s.game, s) end
       if M.pageToMenu2(s) then return end
       if baseUpdate then baseUpdate(s, dt) end
     end
@@ -274,6 +303,7 @@ return function(mod, ctx)
     then return false end
     if game.stack:top() ~= self then return false end
     if self.storeCursor then self:storeCursor() end
+    if HPGuard then HPGuard.keep(game, "POKeMON->START", self.party) end
     self.onCancel()
     return true
   end

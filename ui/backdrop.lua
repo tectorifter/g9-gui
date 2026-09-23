@@ -11,7 +11,7 @@
 --     low-left and a vignette, which is what makes a translucent panel read
 --     as glass instead of as a grey rectangle.
 --   * the EMBELLISHMENT -- only with ui_embellishment: the diagonal weave,
---     the horizon rule and the drifting highlight.
+--     the horizon rule and the corner brackets.
 return function(mod)
   local B = {}
 
@@ -58,7 +58,9 @@ return function(mod)
     end
   end
 
-  -- t = seconds-ish counter for the slow-moving embellishments
+  -- opts = { background, embellishment, w, h, t } -- t is still accepted from
+  -- callers (they all pass their frame counter) but the backdrop is STATIC: no
+  -- time-varying light is drawn.
   function B.draw(Theme, opts)
     local w, h = opts.w or 540, opts.h or 360
     local C = Theme.col
@@ -73,12 +75,6 @@ return function(mod)
       -- flat gradient a light direction so panels sit on something
       glow(Theme, w * 0.10, h * 0.30, h * 0.85, C.accent, 0.30)
       glow(Theme, w * 0.92, h * 0.86, h * 0.70, C.gold, 0.10)
-      if embellish then
-        local t = (opts.t or 0)
-        local sweep = (math.sin(t * 0.35) * 0.5 + 0.5)
-        glow(Theme, w * (0.35 + sweep * 0.4), h * 0.10, h * 0.55,
-          C.accent, 0.07 + 0.04 * sweep, 8)
-      end
       vignette(Theme, w, h, C.black, 0.34)
     end
 

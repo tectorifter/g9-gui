@@ -236,6 +236,10 @@ return function(mod, ctx)
     B.__g9guiGen2 = true
     B.drawsWidescreen = function() return true end
     B.wantsFillScale = function() return true end
+    -- the page is painted by :drawWidescreen; the native screen list must not
+    -- also paint when Game2 runs stack:draw() under a pushed TextBox (see
+    -- ui/shell.lua's gen2Surface for the whole rule)
+    B.draw = function() end
     B.sgbPalettes = function() return {} end
     B.drawWidescreen = function(s, winW, winH)
       Shell.gen2Page(Theme, s, winW, winH, function(inner) M.drawGen2(inner) end)

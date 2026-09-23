@@ -33,6 +33,27 @@ return function(mod, ctx)
 
   local TABS = { "MODS", "PROFILES", "ERRORS" }
 
+  -- the file the EXPORT LOG row writes; one name, used by the notice and both
+  -- writers below
+  local LOG_FILE = "g9-gui-error-log.txt"
+
+  -- mod.log passes its message through string.format, so a literal % in a path
+  -- or an errno string has to be doubled or the logger itself throws while
+  -- reporting the failure (main.lua's own esc).
+  local function esc(s) return (tostring(s):gsub("%%", "%%%%")) end
+
+  local function warn(msg)
+    if mod and type(mod.log) == "table" and type(mod.log.warn) == "function" then
+      pcall(mod.log.warn, mod.log, esc(msg))
+    end
+  end
+
+  local function info(msg)
+    if mod and type(mod.log) == "table" and type(mod.log.info) == "function" then
+      pcall(mod.log.info, mod.log, esc(msg))
+    end
+  end
+
   -- ------------------------------------------------------------------ errors
   -- The screens that show the manager's error list: the ERRORS tab of the mod
   -- list, and the per-mod ERRORS page a detail screen opens.  Both get one
@@ -109,19 +130,83 @@ return function(mod, ctx)
     return table.concat(out, "\n") .. "\n"
   end
 
-  -- Write it to a real .txt.  The mod sandbox cannot name a file at all, and
-  -- mod.storage only produces .lua/.bin files under dot-free keys, so the
-  -- write goes through an engine module (CacheFs), which runs in the engine's
-  -- own environment where love/io are the real ones.  CacheFs routes to the
-  -- save directory, or to the game folder itself in a portable install.
+  -- Write it to a real .txt.
+  --
+  -- A mod chunk cannot name a file at all (the sandbox blocks love.filesystem
+  -- and has no io/package), and mod.storage only produces .lua/.bin files under
+  -- dot-free keys, so the write has to go through something the engine owns.
+  -- There are two such seams, and this picks the one that behaves the SAME on
+  -- Red and on Gold:
+  --
+  --   1. src.import.CacheFs.write, with its process-global `prefix` PINNED TO
+  --      THE ROOT for the call.  The boot sets that prefix to the active
+  --      version's cache folder ("red/", "gold/"), and stepping through it is
+  --      the engine's own idiom for a tree that is shared -- or, as here, not
+  --      cache data at all: src/mods/LauncherMods.lua pins the prefix before
+  --      copying the shared mods/ tree and src/mods/RequiredImports.lua before
+  --      writing its receipts ("the mods tree is shared by Red and Blue, so pin
+  --      the prefix to the root").  Pinned, the name has no directory part, so
+  --      the call is a plain root-level write: the log lands in the save folder
+  --      beside the engine's own profiles/ and exports/ folders, on both
+  --      generations, and neither the per-version subtree nor CacheFs's
+  --      parent-directory branch (the one step in that function that can turn a
+  --      createDirectory answer into a refusal) is involved at all.
+  --
+  --   2. mod.cache:write, the engine's documented installation-scoped byte
+  --      store (mod_cache/<mod-id>/), which is deliberately NOT scoped to a
+  --      game version.  It is the fallback for an engine without a usable
+  --      CacheFs, and it takes a relative path and a byte string and answers
+  --      ok, err.
+  --
+  -- Both are wrapped: a failure is logged with its reason and reported as the
+  -- short EXPORT FAILED notice rather than thrown into the manager's update.
+  function M.writeLog(text)
+    -- 1. CacheFs, pinned to the root for the write and restored after it (in a
+    -- pcall, so a throw cannot leak the global state into the rest of the run).
+    local hasCf, CacheFs = pcall(require, "src.import.CacheFs")
+    if hasCf and type(CacheFs) == "table" and type(CacheFs.write) == "function" then
+      local saved = CacheFs.prefix
+      local called, wrote, err = pcall(function()
+        CacheFs.prefix = ""
+        return CacheFs.write(LOG_FILE, text)
+      end)
+      CacheFs.prefix = saved
+      if called and wrote then return true, LOG_FILE end
+      warn("g9-gui: error log: CacheFs.write refused " .. LOG_FILE .. ": "
+        .. tostring(called and err or wrote))
+    elseif not hasCf then
+      warn("g9-gui: error log: src.import.CacheFs is unavailable: "
+        .. tostring(CacheFs))
+    else
+      warn("g9-gui: error log: src.import.CacheFs has no write()")
+    end
+
+    -- 2. mod.cache (mod_cache/<mod-id>/<name>), version-agnostic by design.
+    if mod and type(mod.cache) == "table" and type(mod.cache.write) == "function" then
+      local ok, err = mod.cache:write(LOG_FILE, text)
+      if ok then
+        return true, "mod_cache/" .. tostring(mod.id or "g9-gui") .. "/" .. LOG_FILE
+      end
+      warn("g9-gui: error log: mod.cache:write failed: " .. tostring(err))
+    else
+      warn("g9-gui: error log: mod.cache is unavailable")
+    end
+    return false
+  end
+
   function M.exportLog(self)
-    local name = "g9-gui-error-log.txt"
-    local text = M.errorLogText(self)
-    local called, wrote = pcall(function()
-      return require("src.import.CacheFs").write(name, text)
-    end)
-    if called and wrote then
-      self:notify("SAVED " .. name)
+    -- the text is built OUTSIDE the write's pcall (it reads the loader's status
+    -- tables), so a malformed status must not take the manager's update down
+    -- with it -- it becomes the same short notice as any other failure.
+    local ok, text = pcall(M.errorLogText, self)
+    if not ok then
+      warn("g9-gui: error log could not be built: " .. tostring(text))
+      return self:notify("EXPORT FAILED")
+    end
+    local wrote, where = M.writeLog(text)
+    if wrote then
+      info("g9-gui: error log written to " .. tostring(where))
+      self:notify("SAVED " .. LOG_FILE)
     else
       self:notify("EXPORT FAILED")
     end

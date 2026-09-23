@@ -1,7 +1,7 @@
 {
   "id": "g9-gui",
   "name": "modern UI & stats",
-  "version": "2.6.0",
+  "version": "3.1.3",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -21,7 +21,7 @@
     "g9-battle-sprites",
     "national_dex"
   ],
-  "description": "GUI modernization for gen 1 and gen 2.",
+  "description": "Full-screen modern menu suite for Gen 1 and Gen 2.",
   "options_schema": "options.lua",
   "experimental": false,
   "conflicts": [],

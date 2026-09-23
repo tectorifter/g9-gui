@@ -243,8 +243,62 @@ return function(mod)
     return built
   end
 
+  -- ------------------------------------------------------------- UTF-8 guard
+  -- LOVE's text engine raises ("UTF-8 decoding error") out of Font:getWidth
+  -- and love.graphics.print the moment a string is not valid UTF-8, and EVERY
+  -- measurement and draw in this suite goes through one of those two.  A label
+  -- can arrive from anywhere -- a save, a mod's own item name, a ROM string
+  -- that was cut mid-glyph somewhere upstream -- so the four text entry points
+  -- scrub it first.  A malformed byte becomes U+FFFD and an incomplete tail is
+  -- closed off, so the worst case is one replacement glyph instead of a crash
+  -- that takes the whole screen down (this was a real player crash: the Gen 2
+  -- PACK's pocket tabs, reported as `ui/theme.lua: UTF-8 decoding error`).
+  local function scrub(s)
+    if type(s) ~= "string" then return s end
+    -- fast path: ASCII-only strings are always valid
+    if not s:find("[\128-\255]") then return s end
+    local out, i, n = {}, 1, #s
+    local start = 1
+    while i <= n do
+      local b = s:byte(i)
+      local len
+      if b < 0x80 then len = 1
+      elseif b >= 0xC2 and b <= 0xDF then len = 2
+      elseif b >= 0xE0 and b <= 0xEF then len = 3
+      elseif b >= 0xF0 and b <= 0xF4 then len = 4
+      end
+      local ok = len ~= nil and i + len - 1 <= n
+      if ok and len > 1 then
+        for j = i + 1, i + len - 1 do
+          local c = s:byte(j)
+          if c < 0x80 or c > 0xBF then ok = false break end
+        end
+        if ok then
+          -- boundary lead bytes narrow their second byte: no overlongs
+          -- (E0/F0), no surrogates (ED), nothing past U+10FFFF (F4)
+          local b2 = s:byte(i + 1)
+          if (b == 0xE0 and b2 < 0xA0) or (b == 0xED and b2 > 0x9F)
+              or (b == 0xF0 and b2 < 0x90) or (b == 0xF4 and b2 > 0x8F) then
+            ok = false
+          end
+        end
+      end
+      if ok then
+        i = i + len
+      else
+        out[#out + 1] = s:sub(start, i - 1) .. "\xEF\xBF\xBD"
+        i = i + 1
+        start = i
+      end
+    end
+    if start > n then return table.concat(out) end
+    out[#out + 1] = s:sub(start)
+    return table.concat(out)
+  end
+  Theme.scrub = scrub
+
   function Theme.w(str, font)
-    return (font or Theme.fonts(nil).body):getWidth(str)
+    return (font or Theme.fonts(nil).body):getWidth(scrub(str))
   end
 
   -- Cap-height ink of a font, in pixels (the size of a flat-top capital).
@@ -259,28 +313,71 @@ return function(mod)
   -- no room even for the ellipsis the longest bare prefix is used.
   function Theme.fit(str, font, maxPx)
     if str == nil then return str end
-    str = tostring(str)
+    str = scrub(tostring(str))
     font = font or Theme.fonts(nil).body
     if str == "" or maxPx <= 0 then return str end
     if font:getWidth(str) <= maxPx then return str end
+    -- The byte offsets a cut may land on: the position after every WHOLE UTF-8
+    -- sequence.  The search below must never measure anything else -- a
+    -- proportional face truncated mid-glyph (\"POK\" .. the first byte of
+    -- POKeMON's e) hands Font:getWidth a malformed string, which LÖVE's own
+    -- print rejects; that is what "LÖVE's print rejects malformed UTF-8" means
+    -- above, and why the guard used to run only AFTER the search.
+    local cuts = { 0 }
+    do
+      local i, n = 1, #str
+      while i <= n do
+        local b = str:byte(i) or 0
+        local len = 1
+        if b >= 0xF0 then len = 4
+        elseif b >= 0xE0 then len = 3
+        elseif b >= 0xC0 then len = 2 end
+        i = i + len
+        cuts[#cuts + 1] = math.min(i - 1, n)
+      end
+    end
     local function longest(budget)
       if budget <= 0 then return 0 end
-      local lo, hi = 0, #str
+      local lo, hi = 1, #cuts
       while lo < hi do
         local mid = math.floor((lo + hi + 1) / 2)
-        if font:getWidth(str:sub(1, mid)) <= budget then lo = mid else hi = mid - 1 end
+        if font:getWidth(str:sub(1, cuts[mid])) <= budget then lo = mid
+        else hi = mid - 1 end
       end
-      -- do not end on a UTF-8 continuation byte
-      while lo > 0 do
-        local b = str:byte(lo + 1)
-        if b and b >= 0x80 and b < 0xC0 then lo = lo - 1 else break end
-      end
-      return lo
+      return cuts[lo]
     end
     local ell = font:getWidth(ELLIPSIS)
     local n = longest(maxPx - ell)
     if n >= 1 then return str:sub(1, n) .. ELLIPSIS end
     return str:sub(1, longest(maxPx))
+  end
+
+  -- Word-wrap `str` to a pixel budget: words are laid out until the next one
+  -- would pass maxPx, then a new line starts.  A single word wider than the
+  -- whole budget is truncated by fit rather than overflowing.  The popup cards
+  -- have a fixed width, so their body text wraps onto further lines instead of
+  -- being cut to a stub with a trailing ellipsis.
+  function Theme.wrap(str, font, maxPx)
+    if str == nil then return {} end
+    font = font or Theme.fonts(nil).body
+    local out, cur = {}, ""
+    for word in scrub(tostring(str)):gmatch("%S+") do
+      if font:getWidth(word) > maxPx then
+        if cur ~= "" then out[#out + 1] = cur; cur = "" end
+        out[#out + 1] = Theme.fit(word, font, maxPx)
+      else
+        local trial = (cur == "") and word or (cur .. " " .. word)
+        if cur ~= "" and font:getWidth(trial) > maxPx then
+          out[#out + 1] = cur
+          cur = word
+        else
+          cur = trial
+        end
+      end
+    end
+    if cur ~= "" then out[#out + 1] = cur end
+    if #out == 0 then out[1] = "" end
+    return out
   end
 
   -- Ink offset: plain love.graphics.print places the font's LINE TOP at y, so
@@ -344,7 +441,7 @@ return function(mod)
   -- align: nil/"left" | "right" | "center" -- x is then the right edge or the
   -- centre.  Returns the drawn width.
   function Theme.text(str, x, y, font, align, color)
-    str = tostring(str)
+    str = scrub(tostring(str))
     font = font or Theme.fonts(nil).body
     if color then Theme.set(color) end
     love.graphics.setFont(font)

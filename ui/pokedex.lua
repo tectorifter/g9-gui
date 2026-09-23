@@ -1,10 +1,12 @@
 -- ui/pokedex.lua -- the POKeDEX CONTENTS page.
 --
 -- A VIEW takeover of src.ui.PokedexMenu: the engine's own object stays on the
--- stack and keeps every behaviour -- the SEEN/OWN tallies, the list that stops
--- at the highest number seen, the seven-row window with its own syncScroll and
--- pageScroll (LEFT/RIGHT page the list, exactly as the original) and the
--- DexEntry page A now opens.  Only the drawing and the surface change.
+-- stack and keeps every behaviour -- the SEEN/OWN tallies, the seven-row window
+-- with its own syncScroll and pageScroll (LEFT/RIGHT page the list, exactly as
+-- the original) and the DexEntry page A now opens.  Only the drawing and the
+-- surface change, plus the ROW ORDER: the listing is every entry the game
+-- defines, numbered 001 upward to the last one, in that order and no other
+-- (see "the number order" below).
 --
 -- A IS ONE CONFIRM.  The engine's own chooser (PokedexMenu.onChoose) is the
 -- DATA / CRY / AREA / PRNT / QUIT side menu, so reading a species took two
@@ -46,6 +48,80 @@ return function(mod, ctx)
   local MARGIN = Shell.MARGIN
   local ROW = 30
 
+  -- --------------------------------------------------------- the number order
+  -- ROUND THREE HUNDRED AND FIFTEEN.  User: "fix pokedex display so it follows
+  -- entries in numerical order 001 to XXXX whatever is last. no overrides."
+  --
+  -- The engine builds its list up to wDexMaxSeenMon -- the highest number the
+  -- player has SEEN -- and national_dex's SELECT view modes reorder that same
+  -- array underneath this page.  Neither is what the POKeDEX shows now:
+  -- `numericItems` builds every entry the game defines, numbered 001 upward to
+  -- the last one, in that order and no other, and the instance's update masks
+  -- SELECT so no view mode can ever reorder a list this file owns.
+  local function numericItems(game)
+    local data = type(game) == "table" and game.data or nil
+    if type(data) ~= "table" or type(data.pokemon) ~= "table" then
+      return nil
+    end
+    local constants = type(data.constants) == "table" and data.constants or {}
+    local size = tonumber(constants.dexSize) or 151
+    local numFmt = ("%%0%dd"):format(tonumber(constants.dexDigits) or 3)
+    local byDex, last = {}, 0
+    for _, def in pairs(data.pokemon) do
+      local n = type(def) == "table" and tonumber(def.dex) or nil
+      -- a form is numbered far above the roster on purpose (national_dex keeps
+      -- dexSize off those numbers), so the roster stops at the last real entry
+      if n and n >= 1 and n <= size then
+        byDex[n] = def
+        if n > last then last = n end
+      end
+    end
+    if last < 1 then return nil end
+    local save = type(game.save) == "table" and game.save or {}
+    local dex = type(save.pokedex) == "table" and save.pokedex or {}
+    local seen = type(dex.seen) == "table" and dex.seen or {}
+    local owned = type(dex.owned) == "table" and dex.owned or {}
+    local items = {}
+    for n = 1, last do
+      local def = byDex[n]
+      if def then
+        local isOwned = owned[def.id] and true or false
+        local known = isOwned or (seen[def.id] and true or false)
+        local name = known and def.name or "----------"
+        items[#items + 1] = {
+          num = numFmt:format(n),
+          name = name,
+          label = (numFmt .. " %s"):format(n, name),
+          ball = isOwned or nil,
+          value = known and def.id or nil,
+        }
+      end
+    end
+    return items
+  end
+
+  -- The listing's own input, with SELECT reported as never pressed.  The peer's
+  -- view-mode wrapper sits UNDER this page's update, so a pass-through that
+  -- hides one key turns its sort off without touching any of the other keys the
+  -- engine's own cursor branch reads.  Everything else reaches the real input
+  -- untouched, colon call or dot call alike.
+  local function noSortInput(input)
+    return setmetatable({}, { __index = function(_, key)
+      if key == "wasPressed" then
+        return function(a, b)
+          local button = b == nil and a or b
+          if button == "select" then return false end
+          return input:wasPressed(button)
+        end
+      end
+      local value = input[key]
+      if type(value) == "function" then
+        return function(_, ...) return value(input, ...) end
+      end
+      return value
+    end })
+  end
+
   function M.uiSize() return W, H end
   M.isWideBattleLayout = Shell.wide
   function M.wantsFillScale(self) return Shell.wide(self) end
@@ -61,10 +137,29 @@ return function(mod, ctx)
     self.isWideBattleLayout = M.isWideBattleLayout
     self.wantsFillScale = M.wantsFillScale
     self.sgbPalettes = M.sgbPalettes
+    -- the listing is this file's, not the engine's frontier: every entry the
+    -- game defines, 001 upward to the last one, whatever that number is
+    local full = numericItems(self.game)
+    if full and #full > 0 then
+      self.items = full
+      self.index = math.max(1, math.min(tonumber(self.index) or 1, #full))
+      self.scroll = 0
+      if type(self.syncScroll) == "function" then pcall(self.syncScroll, self) end
+    end
     local baseUpdate = self.update
     self.update = function(s, dt)
       s.__t = (s.__t or 0) + 1
-      baseUpdate(s, dt)
+      if type(baseUpdate) ~= "function" then return end
+      local game = s.game
+      local real = type(game) == "table" and game.input or nil
+      if type(real) == "table" and type(real.wasPressed) == "function" then
+        game.input = noSortInput(real)
+        local ok, err = pcall(baseUpdate, s, dt)
+        game.input = real
+        if not ok then error(err, 0) end
+      else
+        baseUpdate(s, dt)
+      end
     end
     -- the side menu A replaces: A pushes DexEntryMenu directly (the DATA row
     -- of the engine's own menu), so a species is one confirm away.  Set on the
@@ -108,14 +203,11 @@ return function(mod, ctx)
       if ok and type(n) == "number" and n > 0 then visible = math.min(n, total) end
     end
 
-    -- national_dex's view modes (SELECT) reorder the very array the engine
-    -- built, and it names the mode on the title row of its own GB screen.  It
-    -- does not expose which mode is current -- the value lives in a closure --
-    -- so it is read back off the row shape (ui/national_dex.lua).  Nil when
-    -- the peer is absent, and the header is then exactly what it always was.
-    local mode = NatDex and NatDex.installed
-      and NatDex.listingMode(items) or nil
-    local tag = mode and NatDex.TAG[mode] or nil
+    -- ROUND 315: the listing is the number order and nothing overrides it, so
+    -- there is no sort mode left to name (the peer's SELECT modes are masked
+    -- out in decorate).  The header keeps the SEEN/OWN tallies; the caption
+    -- states the order and the one key the peer still keeps -- START's search.
+    local natdex = NatDex and NatDex.installed
 
     local rows = {}
     for slot = 1, visible do
@@ -130,14 +222,13 @@ return function(mod, ctx)
 
     local right = ("SEEN %d  OWN %d"):format(self.seenCount or 0,
       self.ownedCount or 0)
-    if tag then right = right .. "   " .. tag end
 
     Shell.top(Theme, game, {
       title = Strings("POK\xc3\xa9DEX"),
       right = right,
-      caption = tag and "SELECT: SORT  START: SEARCH"
+      caption = natdex and "Listed by number   START: SEARCH"
         or "Choose an entry to examine.",
-      captionFont = tag and F.small or nil,
+      captionFont = natdex and F.small or nil,
       money = Shell.money(game),
       embellish = embellish,
     })
@@ -167,12 +258,13 @@ return function(mod, ctx)
   -- ========================================================= Gen 2 (Gold dex)
   -- Gold's PokedexMenu is a widescreen screen whose listing and species entry
   -- are the same object (`self.view`).  This arm draws the LISTING and the
-  -- ENTRY on the suite page, the OPTION (sort mode) as a suite list, and
-  -- delegates the AREA map, the SEARCH screen and UNOWN MODE to the engine's
-  -- own widescreen drawing -- those three are heavy bespoke cart screens and
-  -- stay exactly as Gold ships them.  Everything the engine owns keeps
-  -- running: the modes, the SEEN/OWN tallies, the cursor, the cry, PRNT, the
-  -- search, the nest map and `save.lastDexMode`.
+  -- ENTRY on the suite page and delegates the AREA map, the SEARCH screen and
+  -- UNOWN MODE to the engine's own widescreen drawing -- those three are heavy
+  -- bespoke cart screens and stay exactly as Gold ships them.  Everything the
+  -- engine owns keeps running: the listing's rows, the SEEN/OWN tallies, the
+  -- cursor, the cry, PRNT, the search and the nest map.  ROUND 315 pins the
+  -- sort to OLD (the number order) and masks SELECT, so Gold's NEW / A-Z modes
+  -- and its OPTION screen can no longer reorder the list.
   local G2_ROW = 30
   local G2_VISIBLE = 7
   local G2_MODE = { NEW = "NEW", OLD = "OLD", ["A-Z"] = "A-Z" }
@@ -215,7 +307,7 @@ return function(mod, ctx)
     Shell.top(Theme, self.game, {
       title = Strings("POK\xc3\xa9DEX"),
       right = right,
-      caption = extra or "SELECT: SORT  START: SEARCH",
+      caption = extra or "START: SEARCH",
       captionFont = F.small,
       money = Shell.money(self.game),
       embellish = opt("ui_embellishment") ~= "false",
@@ -236,14 +328,47 @@ return function(mod, ctx)
     local self = builtin2().new(game, opts)
     self.__g9gui = true
     self.__t = 0
+    -- ROUND THREE HUNDRED AND FIFTEEN: the number order, always.  Gold's dex
+    -- opens in whatever mode was saved (NEW is Johto order and prints the
+    -- numbers out of order) and its SELECT opens that sort screen; this page is
+    -- 001 upward to the last entry by number, so the mode is pinned to OLD --
+    -- the national, number order -- and SELECT is masked so it cannot change.
+    local originalMode = tonumber(self.modeIndex) or 1
+    local pinned = false
+    if type(self.mode) == "function" then
+      for i = 1, 4 do
+        self.modeIndex = i
+        local ok, name = pcall(self.mode, self)
+        if ok and name == "OLD" then pinned = true break end
+      end
+    end
+    if pinned then
+      if type(self.rebuild) == "function" then pcall(self.rebuild, self) end
+    else
+      self.modeIndex = originalMode
+    end
     local baseUpdate = self.update
     self.update = function(s, dt)
       s.__t = (s.__t or 0) + 1
-      if baseUpdate then baseUpdate(s, dt) end
+      if type(baseUpdate) ~= "function" then return end
+      local g = s.game
+      local real = type(g) == "table" and g.input or nil
+      if type(real) == "table" and type(real.wasPressed) == "function" then
+        g.input = noSortInput(real)
+        local ok, err = pcall(baseUpdate, s, dt)
+        g.input = real
+        if not ok then error(err, 0) end
+      else
+        baseUpdate(s, dt)
+      end
     end
     self.__g9origWS = self.drawWidescreen
     self.drawsWidescreen = function() return true end
     self.wantsFillScale = function() return true end
+    -- the page is painted by :drawWidescreen; the native screen list must not
+    -- also paint when Game2 runs stack:draw() under a pushed TextBox (see
+    -- ui/shell.lua's gen2Surface for the whole rule)
+    self.draw = function() end
     self.drawWidescreen = function(s, winW, winH)
       s.__g2winW, s.__g2winH = winW, winH
       Shell.gen2Page(Theme, s, winW, winH, function(ss) M.drawGen2(ss) end)
@@ -254,6 +379,8 @@ return function(mod, ctx)
   function M.drawGen2(self)
     local v = self.view or "list"
     if v == "entry" then return M.drawEntry2(self) end
+    -- ROUND 315: SELECT is masked, so Gold's OPTION screen is never entered.
+    -- Kept as a fallback for an engine/patch that sets the view directly.
     if v == "option" then return M.drawOption2(self) end
     if v == "list" or v == "results" then return M.drawList2(self) end
     -- national_dex's own two extra views: drawn on the suite page from the

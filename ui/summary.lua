@@ -28,7 +28,12 @@
 -- moves / trainer data), the move manager and the egg page all in one, with
 -- its own party-walking navigation.  The Gen 2 arm therefore builds Gold's own
 -- src.ui.gen2.SummaryMenu (so all of that keeps running) and paints the suite
--- panel through :drawWidescreen -- see the Gen 2 arm at the end.
+-- panel through :drawWidescreen -- see the Gen 2 arm at the end.  It shows the
+-- SAME four pages the panel does on Gen 1: Gold's trainer-data page gives way
+-- to the EVS and IVS spreads (a Gold mon carries them through the engine mod's
+-- modern model, or through the cart's own stat experience / DVs without it),
+-- and the g9-battle-sprites pack's animated battle sprite is drawn into the
+-- window's top-left corner of every page -- the slot Gen 1's summary wears.
 return function(mod, ctx)
   local Theme, Backdrop = ctx.Theme, ctx.Backdrop
   local opt = ctx.opt
@@ -88,6 +93,59 @@ return function(mod, ctx)
     if key == "def" then return s.def or s.defense or 0 end
     if key == "hp" then return s.hp or 0 end
     return s[key] or 0
+  end
+
+  -- Gold's own spread keys (the cart's), mapped onto this panel's order: it
+  -- keeps attack / defense / special / speed -- ONE Special for both special
+  -- stats -- and its HP DV is not stored at all (see below).
+  local G2_CART_KEY = { atk = "attack", def = "defense", spa = "special",
+                        spd = "special", spe = "speed" }
+
+  -- Re-key one of Gold's own spread tables onto this panel's order.  `hp` is
+  -- derived for the DVs: the cart stores no HP DV, it builds it out of the low
+  -- bits of the other four (attack*8 + defense*4 + speed*2 + special) -- the
+  -- same SetMonDV the engine's own Mon.hpDV reproduces.  Stat experience does
+  -- store hp, so `deriveHp` is false on that side.
+  local function goldSpread(cart, deriveHp)
+    if type(cart) ~= "table" then return nil end
+    local out = {}
+    for _, key in ipairs(ORDER) do
+      if key == "hp" and deriveHp then
+        local a, d = cart.attack or 0, cart.defense or 0
+        local sp, s = cart.special or 0, cart.speed or 0
+        out.hp = (a % 2) * 8 + (d % 2) * 4 + (s % 2) * 2 + (sp % 2)
+      else
+        out[key] = cart[G2_CART_KEY[key] or key] or 0
+      end
+    end
+    return out
+  end
+
+  -- The EV / IV spread behind pages 2 and 3.  The engine mod's modern model --
+  -- the same one ui/train.lua's IV/EV editor writes -- puts mon.evs (0-252)
+  -- and mon.ivs (0-31) on the mon on BOTH generations, keyed by its own ORDER,
+  -- and those are the real Gen 1-style numbers.  A Gold mon on a boot WITHOUT
+  -- that mod carries only the cart's own fields, so they are read rather than
+  -- shown as six empty bars: Gold's stat experience (0-65535) stands in for the
+  -- EV page and its DVs (0-15 -- the cart's own name for IVs) for the IV page.
+  -- Answers (values, cap, totalLabel, totalCap), or nil when the mon has
+  -- neither.
+  local function spread(mon, mode)
+    if type(mon) ~= "table" then return nil end
+    if mode == "ev" then
+      if type(mon.evs) == "table" then return mon.evs, 252, "EV TOTAL", 510 end
+      if Gen2 then
+        local values = goldSpread(mon.statExp, false)
+        if values then return values, 65535, "EV TOTAL", 65535 * 6 end
+      end
+    elseif mode == "iv" then
+      if type(mon.ivs) == "table" then return mon.ivs, 31, "IV TOTAL", 186 end
+      if Gen2 then
+        local values = goldSpread(mon.dvs, true)
+        if values then return values, 15, "IV TOTAL", 15 * 6 end
+      end
+    end
+    return nil
   end
 
   -- The engine's stats accessor plus the engine mod's modern split.  All of it
@@ -183,17 +241,13 @@ return function(mod, ctx)
   end
 
   function pageTotal(mon, page)
-    if page == 2 and mon.evs then
-      local sum = 0
-      for _, k in ipairs(ORDER) do sum = sum + (mon.evs[k] or 0) end
-      return ("EV TOTAL %d/510"):format(sum)
-    end
-    if page == 3 and mon.ivs then
-      local sum = 0
-      for _, k in ipairs(ORDER) do sum = sum + (mon.ivs[k] or 0) end
-      return ("IV TOTAL %d/186"):format(sum)
-    end
-    return nil
+    local mode = page == 2 and "ev" or page == 3 and "iv" or nil
+    if not mode then return nil end
+    local values, _, label, totalCap = spread(mon, mode)
+    if not values then return nil end
+    local sum = 0
+    for _, k in ipairs(ORDER) do sum = sum + (values[k] or 0) end
+    return ("%s %d/%d"):format(label, sum, totalCap)
   end
 
   function drawStatRows(self, t, bar, mon, mode)
@@ -208,10 +262,13 @@ return function(mod, ctx)
     local y = ROW_TOP
     for _, key in ipairs(ORDER) do
       local value, ref
-      if mode == "ev" then
-        value, ref = (mon.evs and mon.evs[key]) or 0, 252
-      elseif mode == "iv" then
-        value, ref = (mon.ivs and mon.ivs[key]) or 0, 31
+      if mode == "ev" or mode == "iv" then
+        -- the modern spread when the mon has one, else the cart's own field
+        -- (and the old empty-bar reading when it has neither)
+        local values, cap = spread(mon, mode)
+        values = values or (mode == "ev" and mon.evs) or mon.ivs
+        ref = cap or (mode == "ev" and 252 or 31)
+        value = (values and values[key]) or 0
       else
         value, ref = statOf(mon, key), maxStat
       end
@@ -388,22 +445,34 @@ return function(mod, ctx)
   end
 
   -- ============================================================= Gen 2 (Gold)
-  -- Gold's SummaryMenu is ONE screen for three jobs: the three stats pages,
-  -- the move manager (opened by the party list's MOVE row OR by SELECT on the
+  -- Gold's SummaryMenu is ONE screen for several jobs: the stats pages, the
+  -- move manager (opened by the party list's MOVE row OR by SELECT on the
   -- MOVES page) and the egg page.  It owns its own navigation -- up/down walk
   -- the party, left/right turn PINK/GREEN/BLUE, A falls through to the next
   -- page and quits from BLUE, SELECT opens the move detail -- so, exactly like
   -- every other screen, this arm builds that engine object
   -- (src.ui.gen2.SummaryMenu) and swaps only :drawWidescreen.  What it draws is
-  -- Gold's own information set, laid out in the suite's panel: a STATS page of
-  -- the six derived stats, a MOVES page of the held item and the four moves, an
-  -- INFO page of the OT / ID / dex number, the move manager, and the egg page.
+  -- the SAME four pages the Gen 1 arm draws, laid out in the suite's panel: a
+  -- STATS page of the six derived stats beside the HP / status / type / item /
+  -- EXP block, the EVS and IVS spreads (Gold's trainer-data page has no home
+  -- here -- those two spreads are what the panel is for), and a MOVES page of
+  -- the held item and the four moves.  Gold's own count is three and its
+  -- BLUE_PAGE is an upvalue of its turnPage, so the two places its update
+  -- resolves a page against that count are re-pointed at our four pages below:
+  -- A walks on instead of quitting at page 3, and SELECT opens the move
+  -- manager on MOVES rather than on the EVS page.
   --
   -- The panel floats over the party page exactly as the Gen 1 panel does: the
   -- party screen beneath (one of ours) re-draws its own page for us, and the
   -- dim is then applied, so Gold reads as the same lift.
 
-  local G2_TABS = { "STATS", "MOVES", "INFO" }
+  -- The four tabs, in the Gen 1 arm's order.
+  local G2_TABS = { "STATS", "EVS", "IVS", "MOVES" }
+
+  -- The window's top-left battle-sprite slot -- the exact box the sprites mod
+  -- paints Gen 1's summary sprite into (its NATIVE_SUMMARY_BOX): 56 wide,
+  -- centred on x=8, feet on the y=56 rule, drawn over the panel's corner.
+  local SPRITE_BOX = { x = 8, w = 56, bottom = 56 }
 
   -- pcall a method and take its first answer (or nil).  The engine object may
   -- be a bare stub and a missing accessor must not blank the page.
@@ -483,15 +552,74 @@ return function(mod, ctx)
     local self = Summary2.new(game, opts)
     self.__g9gui = true
     self.__t = 0
+    -- Four pages here, not Gold's three: EVS and IVS take the trainer-data
+    -- page's place.  The engine turns a page with `self:turnPage(...)`, so
+    -- overriding the instance method re-spans the wrap for us; the engine's
+    -- own turnPage keeps closing over its BLUE_PAGE upvalue, which is why A is
+    -- re-pointed in the update wrapper below rather than by touching it.
+    function self:turnPage(delta)
+      local page = (self.page or 1) + delta
+      if page > #G2_TABS then page = 1 end
+      if page < 1 then page = #G2_TABS end
+      self.page = page
+    end
     -- tick an animation counter; the engine's own update (pages, party walk,
     -- the move manager, the cry) is otherwise untouched.
     local baseUpdate = self.update
     self.update = function(s, dt)
       s.__t = (s.__t or 0) + 1
+      -- The two page taps the engine resolves against ITS own page set:
+      --   * A quits on Gold's BLUE page (3); here page 3 is IVS, so A walks on
+      --     to MOVES and only quits from the last page;
+      --   * SELECT opens the move manager on Gold's GREEN page (2); that is
+      --     our EVS page, and the manager belongs to MOVES (the last one).
+      -- Everything else -- B, left/right (through the turnPage above), the
+      -- up/down party walk, the move manager and the egg page -- stays the
+      -- engine's own.  Both arms stand aside while the manager is up.
+      local input = s.game and s.game.input
+      local egg = s.mon and s.mon.isEgg
+      if input and not s.moveDetail and not egg then
+        if input:wasPressed("a") and (s.page or 1) >= 3 then
+          if s.page >= #G2_TABS then s:close() else s:turnPage(1) end
+          return
+        end
+        if input:wasPressed("select") then
+          if s.page == #G2_TABS then
+            s.moveDetail = true
+            s.moveIndex = 1
+          end
+          return
+        end
+      end
       if baseUpdate then baseUpdate(s, dt) end
     end
     Shell.gen2Surface(Theme, self, function(s) M.drawGen2(s) end)
     return self
+  end
+
+  -- The ADV.STATS panel paints its OWN page, so the sprites mod's own summary
+  -- hooks never run for it: it has to ask that mod for the frame itself.
+  -- `drawSummaryFrame(mon, box)` is g9-battle-sprites' always-on export for
+  -- exactly this -- the LIVE animation frame, foot-anchored in the caller's box,
+  -- in the same art and the same place Gen 1's summary wears it (see
+  -- ui/portraits.lua for the same peer-export pattern).  A copy of the sprites
+  -- mod older than 3.1.1 has no such export: the panel simply keeps its corner
+  -- clear, and ONE log line says so rather than the art just looking absent.
+  local spritePeerLogged = false
+  local function drawSpriteFrame(mon)
+    local handle = mod.find and mod.find("g9-battle-sprites") or nil
+    local ex = handle and handle.exports or nil
+    local fn = ex and ex.drawSummaryFrame or nil
+    if type(fn) ~= "function" then
+      if not spritePeerLogged then
+        spritePeerLogged = true
+        mod.log:info("g9-battle-sprites has no drawSummaryFrame export (a "
+          .. "copy older than 3.1.1) -- the ADV.STATS panel keeps its battle "
+          .. "sprite off")
+      end
+      return false
+    end
+    return pcall(fn, mon, SPRITE_BOX)
   end
 
   local function drawTabs2(self, t, C, F)
@@ -568,30 +696,6 @@ return function(mod, ctx)
     Theme.set(C.border)
     Theme.rect("fill", OX + BODY_X, OY + y + 4, PW - BODY_X * 2, 1, 0)
     t("SELECT  MOVE MANAGER", BODY_X, y + 12, "left", C.gold)
-  end
-
-  -- BLUE page: the trainer data (ID / OT / dex number) beside the stats.
-  local function drawInfo2(self, t, bar, C, F)
-    local mon = self.mon or {}
-    local small = Theme.fonts(self.game).small
-    local def = g2def(self)
-    local rows = {
-      { "ID", tostring(safe(self.otId, self) or 0) },
-      { "OT", tostring(safe(self.otName, self) or "?") },
-      { "DEX", ("No.%03d"):format((def and def.dex) or 0) },
-    }
-    local y = ROW_TOP
-    for _, r in ipairs(rows) do
-      t(r[1], BODY_X, y, "left", C.inkFaint, small)
-      t(r[2], BODY_X + 70, y, "left", C.ink)
-      y = y + ROW_STEP
-    end
-    local y2 = ROW_TOP
-    for _, k in ipairs(ORDER) do
-      t(LABEL[k] or k, ID_X, y2 + 7, "left", C.inkFaint, small)
-      t(tostring(statOf(mon, k)), ID_R, y2 + 7, "right", C.ink, small)
-      y2 = y2 + ROW_STEP
-    end
   end
 
   local function drawEgg2(self, t, C, F)
@@ -722,8 +826,9 @@ return function(mod, ctx)
       drawMoveDetail2(self, t, bar, C, F)
     else
       drawTabs2(self, t, C, F)
-      if self.page == 2 then drawMoves2(self, t, C, F)
-      elseif self.page == 3 then drawInfo2(self, t, bar, C, F)
+      if self.page == 2 then drawStatRows(self, t, bar, self.mon or {}, "ev")
+      elseif self.page == 3 then drawStatRows(self, t, bar, self.mon or {}, "iv")
+      elseif self.page == 4 then drawMoves2(self, t, C, F)
       else drawStats2(self, t, bar, C, F) end
     end
 
@@ -735,8 +840,19 @@ return function(mod, ctx)
       t("B  BACK", PW - BODY_X, PH - 30, "right", C.inkFaint)
     else
       t("L/R  PAGE", BODY_X, PH - 30, "left", C.inkFaint)
+      local total = pageTotal(self.mon, self.page)
+      if total then t(total, PW - 90, PH - 30, "right", C.gold) end
       t(G2_TABS[self.page] or "", PW - BODY_X, PH - 30, "right", C.inkDim)
     end
+
+    -- The animated battle sprite in the window's top-left corner -- the slot,
+    -- the size and the art Gen 1's summary wears, drawn LAST so it sits over
+    -- the panel's corner exactly as it does there.  The egg page gets it too:
+    -- g9-battle-sprites answers an egg with its one egg picture (see that mod's
+    -- own EGGS section), so an egg is represented by the same art here as it is
+    -- anywhere else.  Skipped in the move manager only: the one screen Gen 1's
+    -- summary has no counterpart for, and no page of the spread.
+    if not moveMode then drawSpriteFrame(self.mon) end
 
     Theme.set(C.white)
   end

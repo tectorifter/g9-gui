@@ -22,6 +22,11 @@
 --                    and card.
 --   * QuarantineReport -> ui/load_report.lua  the one-shot LOAD REPORT shown
 --                    after a save is read and something in it changed.
+--   * EvolutionState / Gen2EvolutionAnim -> ui/evolution.lua  the evolution
+--                    movie on BOTH generations: the engine's own animation
+--                    (cry, flash, cancel, reveal, learn-move run) on this
+--                    suite's page, with the creature drawn from the
+--                    g9-battle-sprites pack's front battle sheets.
 --
 -- Two screens this mod does NOT own are re-skinned IN PLACE when another mod
 -- pushes them -- their own mods stay whole and are never outdated:
@@ -44,6 +49,28 @@
 --                    through the engine's render.hud hook, so the panel and
 --                    its type are rasterised at the window's own resolution
 --                    while the box stays exactly the 20x6 tiles it always was.
+--   * every YES/NO (and labelled two-option) prompt -> ui/choice.lua  the
+--                    engine's src.ui.ChoiceBox, which rides just above that
+--                    card.  Since 2.6.7 it is modernised on BOTH generations,
+--                    painted through the dialogue card's own window space.
+--   * every PC page -> ui/pc.lua  the Pokecenter PC's own top menu, the
+--                    player's ITEM storage menu and its WITHDRAW / DEPOSIT /
+--                    TOSS lists, BILL's PC storage menu and its WITHDRAW /
+--                    DEPOSIT / RELEASE lists, and the CHANGE BOX picker.
+--                    The engine builds the real src.ui.Menu / ListMenu and
+--                    keeps its cursor, keepOpen flow and every item / mon
+--                    write; this skin swaps only the surface and the page.
+--                    The lists and the picker are caught by the engine's own
+--                    "pc_*" kind; the top menu has neither an id nor a kind
+--                    and is pushed from a text box's callback, so
+--                    OverworldState:openPC is wrapped to mark it.
+--                    Since 2.7.0 every Gold PC screen is dressed too -- Gold's
+--                    five PC classes are BESPOKE (not Menu/ListMenu), so they
+--                    are recognised by the screenId their own push stamps and
+--                    dressed at this same wrapper (G2_SCREENS in ui/pc.lua);
+--                    the item PC's DEPOSIT phase hands the page to ui/bag.lua's
+--                    own PACK painter, exactly as the engine's drawPanel drew
+--                    the pack window inside the item PC.
 -- All of them are caught at the one choke point every state goes through, a
 -- StateStack.push wrapper (main.lua), so they need no cooperation from the
 -- mods that own them (and none from the engine's own TextBox either).
@@ -105,6 +132,7 @@
 --   ui_background    ON/OFF  -- the layered backdrop vs a flat dark field
 --   ui_embellishment ON/OFF  -- corner brackets, rules, header emblem, pulse
 --   ui_portraits     sprites/icons -- portrait band art per roster row
+--   ui_pc_row        ON/OFF  -- an extra PC row in the START rail (off)
 --
 -- GEN 2: Gold/Silver/Crystal are ported phase by phase (src/g9-gui/GEN2-PORT.md).
 -- Gold registers its screens under Gen2* ids and paints a widescreen layer
@@ -118,6 +146,17 @@
 -- dialogue card), which are draw-only takeovers of states other mods push, so
 -- they need no Gen2* id -- the same push wrapper dresses them on Gold.  A
 -- screen with no Gen 2 arm keeps the engine's native screen on a Gold boot.
+-- 2.6.4 closes the two places the POKeMON page could still drop to the cart:
+-- the ITEM row's GIVE/TAKE menu (ui/held_item.lua, the Gen2HeldItemMenu id) and
+-- the engine's shared YES/NO box (ui/choice.lua, dressed at the push wrapper
+-- like the dialogue card).  It also stops a taken-over page's native :draw()
+-- painting UNDER the modern page when Game2 runs its stack pass beneath a
+-- pushed TextBox (ui/shell.lua gen2Surface).  2.6.7 brings the window-space
+-- density to Gold (the dialogue card and the YES/NO skin read Game2's own
+-- render.hud viewport payload and paint at native resolution, not into the
+-- blitted 160x144 canvas), modernises the Gold SAVE flow through
+-- ui/dialogs.lua, and answers LEFT/RIGHT directionally on the save and QUIT
+-- confirms.
 -- =============================================================================
 return function(mod)
   -- ------------------------------------------------------------------ helpers
@@ -198,6 +237,34 @@ return function(mod)
     return not (v == "false" or v == false)
   end
 
+  -- Published BEFORE the MODERN UI gate below, because g9-battle-engine reads
+  -- it for the Pokecenter chat and must get an answer even when this mod's own
+  -- screens are switched off. mod.options:get only ever sees the CALLING mod's
+  -- own bucket, so the engine mod (a different mod) cannot read this row
+  -- directly -- this export is the supported cross-mod route.
+  mod.exports.shortHealChatEnabled = function()
+    return on("short_heal_chat")
+  end
+
+  -- ------------------------------------------------- species display names
+  -- Rewrite every alternate form's record `name` to the name the player should
+  -- read (see ui/display_names.lua for the rule and why it is a record edit).
+  -- Deliberately BEFORE the MODERN UI gate: the engine's own Pokedex entry
+  -- page, party list and battle HUD read the same records, so this is the
+  -- game's naming, not one page's, and it must hold even with the modern
+  -- screens switched off.  national_dex ships priority 90 and this mod 100, so
+  -- its records are already registered here; with national_dex absent the
+  -- loop finds no forms and changes nothing.
+  local DisplayNames = loadSibling("ui/display_names.lua")
+  if DisplayNames and type(DisplayNames.apply) == "function" then
+    local changed = attempt("ui/display_names.lua apply",
+      DisplayNames.apply, mod)
+    if type(changed) == "number" then
+      info(("g9-gui: species display names -- %d form record%s renamed")
+        :format(changed, changed == 1 and "" or "s"))
+    end
+  end
+
   -- ------------------------------------------------------- generation gate
   -- Which generation is booting.  This used to be a hard gate that bailed on
   -- Gen 2; it now only decides WHICH screen ids get installed (Gold prefixes
@@ -234,6 +301,10 @@ return function(mod)
   local Shell = loadSibling("ui/shell.lua")
   local Portraits = loadSibling("ui/portraits.lua")
   local Roster = loadSibling("ui/roster.lua")
+  -- The party-HP sentinel (ui/hp_guard.lua).  Optional and fail-open: if it
+  -- does not load the two menu pages simply browse without it, exactly as
+  -- they did before it existed.
+  local HPGuard = loadSibling("ui/hp_guard.lua")
   if not (Theme and Backdrop and Shell and Portraits and Roster) then
     warn("g9-gui: shared ui modules failed to load -- no screens installed")
     return
@@ -262,20 +333,33 @@ return function(mod)
     ModernStats = engine and engine.exports.ModernStats or nil,
     MoveCategory = engine and engine.exports.MoveCategory or nil,
   }
+  -- Build the HP sentinel and read its Mod Manager row.  Both fail open: no
+  -- guard, or an unreadable option, only means the two menu pages browse
+  -- without the net (see ui/hp_guard.lua).
+  if HPGuard then
+    ctx.HPGuard = attempt("ui/hp_guard.lua init", HPGuard, mod)
+    if ctx.HPGuard then
+      local mode = "catch"
+      local okMode, value = pcall(opt, "ui_hp_guard")
+      if okMode and type(value) == "string" then mode = value end
+      ctx.HPGuard.setMode(mode)
+    end
+  end
   -- national_dex compatibility (ui/national_dex.lua).  Optional: it is what
-  -- lets the POKeDEX and the species entry page draw the mod's own view modes,
-  -- STATS page and evolution/learnset strip on the suite's pages, and it is
-  -- inert the moment national_dex is not installed -- every reader goes through
-  -- the peer's published exports and there is nothing to reach without them.
+  -- lets the POKeDEX draw the peer's roster in number order and the species
+  -- entry page draw its STATS page and evolution/learnset strip on the suite's
+  -- pages, and it is inert the moment national_dex is not installed -- every
+  -- reader goes through the peer's published exports and there is nothing to
+  -- reach without them.
   -- Put on ctx so both screen factories (and the entry page especially) can
   -- ask it what the peer offers.
   local NatDex = loadSibling("ui/national_dex.lua")
   ctx.NatDex = NatDex and attempt("ui/national_dex.lua init", NatDex, mod, ctx)
     or nil
   if ctx.NatDex and ctx.NatDex.installed then
-    info(("g9-gui: national_dex %s found -- the POKeDEX listing and entry "
-      .. "pages will draw its view modes, STATS page and species strip")
-      :format(tostring(ctx.NatDex.version or "?")))
+    info(("g9-gui: national_dex %s found -- the POKeDEX listing draws its full "
+      .. "roster in number order and its entry pages gain the STATS page and "
+      .. "the species strip"):format(tostring(ctx.NatDex.version or "?")))
   end
 
   -- the modern modals (SAVE / QUIT / notices) the START screen and the title
@@ -288,6 +372,27 @@ return function(mod)
   if not ctx.Dialogs then
     warn("g9-gui: the modal dialogs failed to load -- SAVE and QUIT keep the "
       .. "engine's classic prompts (see ui/dialogs.lua)")
+  end
+
+  -- ------------------------------------------------ bag capacity / pockets
+  -- ui/bag_util.lua carries the bag's raised capacity (300 slots, x999 per
+  -- item -- see the module header), its overflow guards and the six Gen 1
+  -- pockets, adapted from the "Useful Bag" mod.  It stands down on its own if
+  -- Useful Bag is installed, so the two never fight over one constant.  The
+  -- install runs before the screens so the capacity is live the moment a bag
+  -- can open; the sort keys (TAB / R3 / touch SELECT) are bound at game.ready.
+  local BagUtil = loadSibling("ui/bag_util.lua")
+  ctx.BagUtil = BagUtil and attempt("ui/bag_util.lua init", BagUtil, mod, ctx)
+    or nil
+  if ctx.BagUtil then
+    local okB, enabled = pcall(ctx.BagUtil.install)
+    if not okB then
+      warn("g9-gui: bag capacity could not be installed: " .. tostring(enabled))
+    elseif enabled then
+      mod.events:on("game.ready", function()
+        pcall(ctx.BagUtil.installInput)
+      end)
+    end
   end
 
   -- --------------------------------------------------------------- screens
@@ -325,6 +430,13 @@ return function(mod)
     install("Gen2PartyMenu", "ui/party_menu.lua")
     install("Gen2SummaryMenu", "ui/summary.lua")
     install("Gen2PackMenu", "ui/bag.lua")
+    -- the mart: Gold's own bespoke MartMenu, drawn as the same page (the sell
+    -- phase's pack is the modern PACK above, via ctx.Bag.drawGen2)
+    install("Gen2MartMenu", "ui/shop.lua")
+    -- the held-item menu the party submenu's ITEM row opens.  It is not part of
+    -- the START tree -- Gold pushes it over the POKeMON page -- so without this
+    -- the ITEM row dropped to the cart's white GIVE/TAKE window (ui/held_item.lua)
+    install("Gen2HeldItemMenu", "ui/held_item.lua")
     install("Gen2PokedexMenu", "ui/pokedex.lua")
     install("Gen2OptionsMenu", "ui/options.lua")
     install("Gen2TrainerCard", "ui/trainer_card.lua")
@@ -336,6 +448,13 @@ return function(mod)
     -- the mod manager keeps its id on both generations (src/ui/Screens.lua's
     -- BUILTIN table), so Gold's push reaches this same takeover
     install("ManagerState", "ui/manager.lua")
+    -- the evolution movie (engine/movie/evolution_animation.asm).  Gold pushes
+    -- src.ui.gen2.EvolutionAnim under the Gen2EvolutionAnim id; the module
+    -- keeps the engine's whole state machine (cry, flash rounds, the B-press
+    -- cancel, the reveal and the learn-move run) and paints the suite's page
+    -- through :drawWidescreen, with the creature drawn from g9-battle-sprites'
+    -- own front sheets (ui/evolution.lua)
+    install("Gen2EvolutionAnim", "ui/evolution.lua")
   else
     install("StartMenu", "ui/start_menu.lua")
     install("PartyMenu", "ui/party_menu.lua")
@@ -345,6 +464,10 @@ return function(mod)
     -- the same size as the START and POKeMON screens rather than falling back
     -- to the classic 160x144 letterbox.
     install("BagMenu", "ui/bag.lua")
+    -- the mart: the engine's ShopMenu built and amended, and its pushed buy /
+    -- sell lists dressed at the wrapper below (the sell list is drawn as the
+    -- bag page, matching the Gen 2 arm)
+    install("ShopMenu", "ui/shop.lua")
     install("PokedexMenu", "ui/pokedex.lua")
     install("OptionsMenu", "ui/options.lua")
     install("TrainerCard", "ui/trainer_card.lua")
@@ -361,6 +484,36 @@ return function(mod)
     -- case) and only redecorate the boxed menus.
     install("TitleState", "ui/title.lua")
     install("QuarantineReport", "ui/load_report.lua")
+
+    -- The evolution movie (engine/movie/evolution.asm).  src.ui.EvolutionState
+    -- is pushed on a level-up / stone / trade evolution; the module keeps the
+    -- engine's whole state machine (loading, the cry, the accelerating flash,
+    -- the B-press cancel and the post-evolution learn run) and only paints the
+    -- suite's 540x360 page, with the creature drawn from g9-battle-sprites'
+    -- own front sheets (ui/evolution.lua).
+    install("EvolutionState", "ui/evolution.lua")
+  end
+
+  -- ------------------------------------------------------- the move learner
+  -- The engine's own src.ui.MoveLearnMenu -- the "X is trying to learn Y! ...
+  -- Delete an older move?" question and its four-move forget list -- on the
+  -- suite's page (ui/move_learn.lua).  It is registered under the ENGINE's own
+  -- id on BOTH generations, because the engine emits no Gen2 prefix for it
+  -- (src/ui/Screens.lua's GEN2 list has no MoveLearn): Gold's move learning is
+  -- handled inside Gen2BattleState, so only a peer mod that pushes the engine's
+  -- screen (g9-Battle-Scene's in-battle learn pause) reaches it there, and it
+  -- reaches it by this same id.  Registering it means EVERY caller gets the
+  -- modern page -- the native battle queue, the bag's TM use, the evolution's
+  -- learn run and the battle scene alike.
+  --
+  -- The id is also PUBLISHED as mod.exports.moveLearnScreenId, so a peer mod
+  -- that pushes the learner can tell the modern screen is live and skip its own
+  -- fallback chrome (see g9-Battle-Scene's FN.guiMoveLearnId).  Set only when
+  -- the screen really registered -- a g9-gui with MODERN UI off, a failed
+  -- sibling or a partial install leaves the export unset, which is how that
+  -- peer knows to fall back to the engine's classic screen.
+  if install("MoveLearnMenu", "ui/move_learn.lua") then
+    mod.exports.moveLearnScreenId = "MoveLearnMenu"
   end
 
   -- --------------------------------------------------- TRAIN / BLACKLIST skins
@@ -381,9 +534,10 @@ return function(mod)
   -- src.render.TextBox is the ONE shared dialogue class on both generations.
   -- So each skin is generation-aware: on Gold, ui/train.lua and ui/blacklist.lua
   -- swap the instance's surface trio for the suite's 540x360 page through
-  -- Shell.gen2Surface, and the dialogue card simply takes the surface space
-  -- because Game2 has no renderer with frameRects, so the window-space path
-  -- never activates (ui/textbox.lua -- window-space density stays Gen 1 only).
+  -- Shell.gen2Surface, and the dialogue card takes the WINDOW space off the
+  -- render.hud viewport payload Game2 hands the hook (Game2 has no renderer
+  -- with frameRects, but its letterbox is exactly gameX/gameY/scale -- see
+  -- ui/textbox.lua), so both generations get the same native density.
   local Train = loadSibling("ui/train.lua")
   if Train then Train = attempt("ui/train.lua init", Train, mod, ctx) end
   if type(Train) == "table" and type(Train.dress) == "function" then
@@ -408,6 +562,70 @@ return function(mod)
     takeovers[#takeovers + 1] = "DIALOGUE"
     takeovers.Textbox = Textbox
   end
+  -- The dialogue card's WINDOW space, exposed so ui/choice.lua can paint the
+  -- box riding above it through the very same origin/scale -- one derivation,
+  -- so the pair can never disagree about where the UI pixels land.  Only the
+  -- table is shared; the choice skin is still loaded and fails alone.
+  if Textbox then ctx.Textbox = Textbox end
+  -- ...and the engine's YES/NO box, which rides just above that card.  It is
+  -- one shared class on both generations, and since 2.6.7 both generations
+  -- modernise it: the box is painted through the dialogue card's own window
+  -- space (ui/choice.lua's render.hud painter), so YES/NO and the labels are
+  -- as sharp as the question above them.  Only a box over a conversation the
+  -- suite already dressed is modernised (a battle's switch offer and a bare
+  -- shop/PC prompt keep the engine's own drawing).
+  local Choice = loadSibling("ui/choice.lua")
+  if Choice then Choice = attempt("ui/choice.lua init", Choice, mod, ctx) end
+  if type(Choice) == "table" and type(Choice.dress) == "function"
+      and type(Choice.isChoiceBox) == "function" then
+    takeovers[#takeovers + 1] = "CHOICE"
+    takeovers.Choice = Choice
+  end
+  -- ...and the engine's "How many?" stepper, which the bag, the mart, the
+  -- PLAYER's PC (withdraw / deposit / toss) and the MOD MANAGER all push.  On a
+  -- classic screen it keeps the engine's own box; over one of this suite's own
+  -- pages it becomes the same centred card the mon submenu and the YES/NO use.
+  local Quantity = loadSibling("ui/quantity.lua")
+  if Quantity then
+    Quantity = attempt("ui/quantity.lua init", Quantity, mod, ctx)
+  end
+  if type(Quantity) == "table" and type(Quantity.dress) == "function"
+      and type(Quantity.isQuantity) == "function"
+      and type(Quantity.canDress) == "function" then
+    takeovers[#takeovers + 1] = "QUANTITY"
+    takeovers.Quantity = Quantity
+  end
+  -- ...and the PC pages: the Pokecenter PC's own top menu, the player's ITEM
+  -- storage menu and its WITHDRAW / DEPOSIT / TOSS lists, BILL's PC storage
+  -- menu and its WITHDRAW / DEPOSIT / RELEASE lists, and the CHANGE BOX
+  -- picker.  All of them are Menu / ListMenu instances the engine builds and
+  -- keeps driving -- only the top menu and the two storage menus carry any
+  -- identity (two screen ids and the engine's own "pc_*" kind strings), so
+  -- ui/pc.lua dresses them at this same push wrapper, and installOpenPc()
+  -- wraps OverworldState:openPC to mark the one top menu it builds inline
+  -- (it has neither an id nor a kind, and it is pushed later, from the
+  -- "turned on the PC" text box's callback).
+  local Pc = loadSibling("ui/pc.lua")
+  if Pc then Pc = attempt("ui/pc.lua init", Pc, mod, ctx) end
+  if type(Pc) == "table" and type(Pc.dress) == "function"
+      and type(Pc.isPc) == "function" then
+    takeovers[#takeovers + 1] = "PC"
+    takeovers.Pc = Pc
+  end
+  -- ...and the mart's own buy / sell LISTs (Gen 1).  The engine builds them
+  -- inside its own ShopMenu closures and pushes them itself, so they are caught
+  -- here -- recognised by the engine's `dialogue` flag, which only a mart sets
+  -- (the PC lists use `messageBox`).  The sell list is drawn as the bag page
+  -- (ui/shop.lua's drawSell -> ui/bag.lua's drawPage), the same presentation
+  -- the Gen 2 sell flow already reaches through the engine's own pack.
+  local Shop = loadSibling("ui/shop.lua")
+  if Shop then Shop = attempt("ui/shop.lua init", Shop, mod, ctx) end
+  if type(Shop) == "table" and type(Shop.isShopList) == "function"
+      and type(Shop.dressList) == "function" then
+    takeovers[#takeovers + 1] = "SHOP"
+    takeovers.Shop = Shop
+    ctx.Shop = Shop
+  end
   if #takeovers > 0 then
     local okS, StateStack = pcall(require, "src.core.StateStack")
     if okS and type(StateStack) == "table"
@@ -425,10 +643,38 @@ return function(mod)
             takeovers.Blacklist.dress(state)
           elseif state.isTextBox and takeovers.Textbox
               and not takeovers.Textbox.surfaceIsWide(state) then
-            -- a battle (or one of this mod's own wide pages) composing its own
-            -- surface keeps the classic box: the box is then centred inside
-            -- the wide canvas and a card drawn in that space would land wrong
+            -- a battle composing its own surface keeps the classic box: the
+            -- box is then centred inside the wide canvas and a card drawn in
+            -- that space would land wrong.  A page of THIS suite no longer
+            -- counts as "wide" here (ui/textbox.lua's surfaceIsWide): the box
+            -- is dressed and its message drawn as the suite's card in the
+            -- PAGE's coordinates, so a PC prompt no longer floats mid-page as
+            -- the cart's white window.
             takeovers.Textbox.dress(state)
+          elseif takeovers.Choice
+              and takeovers.Choice.isChoiceBox(state)
+              and takeovers.Choice.canDress(self, state) then
+            takeovers.Choice.dress(state)
+          elseif takeovers.Quantity
+              and takeovers.Quantity.isQuantity(state)
+              and takeovers.Quantity.canDress(self, state) then
+            takeovers.Quantity.dress(state)
+          elseif takeovers.Pc and takeovers.Pc.isPc(state) then
+            takeovers.Pc.dress(state)
+          elseif takeovers.Shop and takeovers.Shop.isShopList(state) then
+            takeovers.Shop.dressList(state)
+          end
+          -- Gold: a taken-over page is painted by :drawWidescreen, and the
+          -- stack pass Game2 runs under a pushed TextBox must not also call
+          -- that page's own classic :draw() (the native party list showing
+          -- through the dialogue card -- see ui/shell.lua gen2Surface).
+          -- gen2Surface already installs a no-op :draw on the screens that use
+          -- it; this gives the same guarantee to any Gen 2 arm that declares
+          -- :drawsWidescreen itself.
+          if gen == 2 and state.__g9gui
+              and type(state.drawsWidescreen) == "function"
+              and state:drawsWidescreen() then
+            state.draw = function() end
           end
         end)
         if not ok then
@@ -472,18 +718,49 @@ return function(mod)
     end
   end
 
+  -- ...and the YES/NO box's own window-space painter: it paints the box through
+  -- the dialogue card's space (see ui/choice.lua), so it only ever helps when
+  -- that space is available.  Fail-open the same way -- without the hook the box
+  -- keeps the (chunkier) surface card.
+  if takeovers.Choice and type(takeovers.Choice.installHook) == "function" then
+    local okC, hooked = pcall(takeovers.Choice.installHook, mod)
+    if okC and hooked then
+      installed[#installed + 1] = "choice: window-space"
+    elseif not okC then
+      warn("g9-gui: window-space choice box unavailable, keeping the surface "
+        .. "card: " .. tostring(hooked))
+    end
+  end
+
+  -- ...and the PC top menu: OverworldState:openPC builds a plain Menu inline
+  -- and pushes it later, from a text box's callback, so the only way to know
+  -- it is ours is to mark it as openPC creates it (ui/pc.lua's installOpenPc).
+  -- Fail-open: without the wrap the menu is simply left classic, like every
+  -- other Menu this mod does not own.
+  if takeovers.Pc and type(takeovers.Pc.installOpenPc) == "function" then
+    local okP, wrapped = pcall(takeovers.Pc.installOpenPc, mod)
+    if okP and wrapped then
+      installed[#installed + 1] = "pc: top menu"
+    elseif not okP then
+      warn("g9-gui: the PC top menu could not be wrapped, keeping it classic: "
+        .. tostring(wrapped))
+    end
+  end
+
   if #installed == 0 then
     warn("g9-gui: no screens were installed")
     return
   end
 
   info(("g9-gui: modern UI installed on Gen %d for %s (modals %s, "
-    .. "background %s, embellishments %s, portraits %s, modern stats %s)")
+    .. "background %s, embellishments %s, portraits %s, pc row %s, "
+    .. "modern stats %s)")
     :format(
     gen, table.concat(installed, ", "),
     ctx.Dialogs and "on" or "CLASSIC",
     on("ui_background") and "on" or "off",
     on("ui_embellishment") and "on" or "off",
     opt("ui_portraits") or "sprites",
+    on("ui_pc_row") and "on" or "off",
     (engine and engine.exports.ModernStats) and "on" or "off"))
 end

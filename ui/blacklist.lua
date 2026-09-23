@@ -19,8 +19,9 @@
 --
 -- Reads from the sample's Screen (main.lua installBlacklist):
 --   gen 1..9, letter 1..26, focus "list"|"grid", listIndex, listScroll,
---   filtered ({id,name,base,form,dex,gen}), gridRow 1..4 (4 = RESET), gridCol,
---   status.  Everything is read defensively.
+--   filtered ({id,name,base,form,dex,gen}), gridRow 1..5 (1..3 = the 3x3
+--   generation grid, 4 = the [MEGA] [GIGA] pair, 5 = RESET), gridCol, status.
+--   Everything is read defensively.
 --
 -- BOTH GENERATIONS (since 2.5.5).  The sample declares games = gen1/gen2 and
 -- its Screen already publishes Gen 2's own panel contract (drawsWidescreen /
@@ -53,12 +54,20 @@ return function(mod, ctx)
   local GEN_COUNT = 9
 
   -- Geometry on the 540x360 page.  A 9-row name list down the left, the 3x3
-  -- generation grid and the RESET bar down the right, then a short legend.
+  -- generation grid, a [MEGA] [GIGA] row, the RESET bar and a short legend down
+  -- the right.  Since 2.6.5 the form row sits between the grid and RESET, and
+  -- RESET (and the legend) are pushed down to make room for it -- an explicit
+  -- user request, matched by the sample's own row numbers (gridRow 4 = forms,
+  -- 5 = RESET).
   local LIST_X, LIST_Y, LIST_W = MARGIN, Shell.CONTENT_Y, 292
   local LIST_ROW, LIST_VISIBLE = 26, 9
-  local GRID_X0, GRID_Y0, GRID_W, GRID_H, GRID_GAP = 338, 88, 56, 32, 8
-  local GRID_ROWS = { 88, 126, 164 }
-  local RESET_X, RESET_Y, RESET_W, RESET_H = 338, 204, 184, 32
+  local GRID_X0, GRID_W, GRID_GAP = 338, 56, 8
+  local GRID_H = 28
+  local GRID_ROWS = { 82, 116, 150 }
+  local FORM_Y, FORM_W, FORM_GAP = 184, 88, 8
+  local FORM_X = { GRID_X0, GRID_X0 + FORM_W + FORM_GAP }
+  local RESET_X, RESET_Y, RESET_W, RESET_H = 338, 220, 184, 28
+  local LEGEND_X, LEGEND_Y, LEGEND_W, LEGEND_H = 338, 254, 184, 52
 
   -- ------------------------------------------------------------------ reads
   local function readSet(game)
@@ -96,6 +105,25 @@ return function(mod, ctx)
     return nil
   end
 
+  -- Mega / Gigantamax are the two form GROUPS the window toggles at once (and
+  -- delists by default).  This mirrors the sample's own `formGroupOf`: the
+  -- record's `form` label first, the id suffix as a fallback.  Eternamax and
+  -- the regional/primal/crowned forms are deliberately not groups.
+  local function formGroupOf(id, rec)
+    local form = type(rec) == "table" and rec.form
+    if type(form) == "string" and form ~= "" then
+      local f = form:upper()
+      if f == "GMAX" or f:sub(-5) == "_GMAX" then return "gmax" end
+      if f:find("MEGA", 1, true) then return "mega" end
+    end
+    if type(id) == "string" then
+      local u = id:upper()
+      if u:sub(-5) == "_GMAX" then return "gmax" end
+      if u:sub(-5) == "_MEGA" or u:find("_MEGA_", 1, true) then return "mega" end
+    end
+    return nil
+  end
+
   -- Every displayable species/form, for the gen-complete computation.  Same
   -- base-dex resolution the sample uses, so a cell's "complete" mark matches
   -- what its own toggle would write.
@@ -116,7 +144,7 @@ return function(mod, ctx)
         end
         if type(dex) ~= "number" then dex = rec.dex end
         out[#out + 1] = { id = id, base = base,
-          gen = generationOfDex(dex) }
+          gen = generationOfDex(dex), group = formGroupOf(id, rec) }
       end
     end
     return out
@@ -133,6 +161,21 @@ return function(mod, ctx)
     for i = 1, #index do
       local e = index[i]
       if e.gen == gen then
+        any = true
+        if not (set[e.id] or (e.base and set[e.base])) then return false end
+      end
+    end
+    return any
+  end
+
+  -- True when the whole form group (every Mega, or every Gigantamax) is
+  -- delisted -- the sample's own blacklistFormGroupComplete, computed from the
+  -- same set so the cell's check mark and its A toggle always agree.
+  local function formGroupComplete(index, set, group)
+    local any = false
+    for i = 1, #index do
+      local e = index[i]
+      if e.group == group then
         any = true
         if not (set[e.id] or (e.base and set[e.base])) then return false end
       end
@@ -226,20 +269,30 @@ return function(mod, ctx)
       cell(game, x, y, GRID_W, GRID_H, "G" .. g, on and "focus" or nil,
         genComplete(index, set, g))
     end
-    local resetOn = (self.focus == "grid" and (self.gridRow or 0) >= 4)
+    -- The [MEGA] / [GIGA] row (explicit user request): each cell flips the whole
+    -- form group at once and carries that group's own complete check.  The
+    -- sample's row 4 is this pair; row 5 is RESET.
+    local forms = { { "MEGA", "mega" }, { "GIGA", "gmax" } }
+    for i = 1, #forms do
+      local on = (self.focus == "grid" and self.gridRow == 4
+        and self.gridCol == i)
+      cell(game, FORM_X[i], FORM_Y, FORM_W, GRID_H, forms[i][1],
+        on and "focus" or nil, formGroupComplete(index, set, forms[i][2]))
+    end
+    local resetOn = (self.focus == "grid" and (self.gridRow or 0) >= 5)
     cell(game, RESET_X, RESET_Y, RESET_W, RESET_H, "RESET ALL",
       resetOn and "focus" or nil, false)
 
-    -- short legend under the grid, in the small face
-    Theme.panel(GRID_X0, 248, 184, 56, { radius = 6, shadow = 2 })
+    -- short legend under the RESET bar, in the small face
+    Theme.panel(LEGEND_X, LEGEND_Y, LEGEND_W, LEGEND_H, { radius = 6, shadow = 2 })
     local lines = {
       "A: TOGGLE ROW OR CELL",
       "START/SELECT: FILTER",
       "HELD = SKIPPED",
     }
     for i = 1, #lines do
-      Theme.text(Theme.fit(lines[i], F.small, 160), GRID_X0 + 14,
-        256 + (i - 1) * 16, F.small, "left", C.inkFaint)
+      Theme.text(Theme.fit(lines[i], F.small, LEGEND_W - 24), LEGEND_X + 14,
+        LEGEND_Y + 8 + (i - 1) * 15, F.small, "left", C.inkFaint)
     end
   end
 
@@ -311,7 +364,12 @@ return function(mod, ctx)
         baseUpdate(s, dt)
       end
     end
-    state.draw = function(s) M.draw(s) end
+    -- Gen 1 draws the page through this instance's OWN :draw; Gold's page is
+    -- painted by the :drawWidescreen Shell.gen2Surface installed (together
+    -- with a no-op :draw), so leave that no-op alone (see ui/train.lua).
+    if not Gen2 then
+      state.draw = function(s) M.draw(s) end
+    end
     return state
   end
 

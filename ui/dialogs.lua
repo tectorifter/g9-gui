@@ -52,18 +52,32 @@ return function(mod, ctx)
   -- Does a page of ours sit under this dialog (so it should float and dim
   -- rather than paint its own backdrop)?  Asked at PUSH time, when the state
   -- below is the top of the stack.
-  local function floatsOver(game)
-    local stack = game and game.stack
-    local top = stack and stack.top and stack:top()
-    if not (top and top.__g9gui and top.isOpaque) then return false end
-    return (top.isWideBattleLayout and top:isWideBattleLayout()) and true or false
+  local function floatsOverTop(top)
+    if not (type(top) == "table" and top.__g9gui) then return false end
+    if ctx.gen == 2 then
+      -- Gold hands the whole window to the TOP widescreen state, so nobody
+      -- else repaints the page under a dialog -- unless that page offers a
+      -- repaint hook, which this dialog then calls itself (see `paintBack`).
+      return type(top.__g9guiPage) == "function"
+    end
+    if top.isOpaque ~= true then return false end
+    if not (top.isWideBattleLayout and top:isWideBattleLayout()) then
+      return false
+    end
+    return true
   end
 
   local function newState(game, kind)
+    local stack = game and game.stack
+    local top = stack and stack.top and stack:top()
+    local floats = floatsOverTop(top)
     local s = {
       game = game, __g9gui = true, __kind = kind, __t = 0,
       letterboxWhite = true,
-      isOpaque = not floatsOver(game),
+      isOpaque = not floats,
+      -- the page this dialog floats over, captured now: it is what has to be
+      -- repainted beneath us on Gold (see `paintBack`)
+      __under = floats and top or nil,
     }
     setmetatable(s, { __index = D })
     return s
@@ -98,16 +112,35 @@ return function(mod, ctx)
   -- leave a blank frame (an opaque dialog hides the menu under it).  Wrap both
   -- halves: a draw/update failure is logged ONCE with its message and the
   -- dialog steps aside, so the screen beneath comes back instead of blanking.
+  -- One log line per dialog, whatever half threw first.
+  local function reportFailure(s, err)
+    if s.__reported then return end
+    s.__reported = true
+    local msg = ("g9-gui: the %s dialog failed: %s")
+      :format(tostring(s.__kind), tostring(err)):gsub("%%", "%%%%")
+    if mod and mod.log then mod.log:warn(msg) end
+  end
+
+  -- Install a dialog's page painter for whichever generation is booting.  On
+  -- Gold the page is painted whole-window through Shell.gen2Surface, exactly
+  -- like every other screen the suite took over there; on Gen 1 it is the
+  -- 540x360 surface :uiSize answers with.  Either way the painter is guarded,
+  -- so a failure costs the dialog (logged once) rather than the frame.
+  local function setPaint(s, fn)
+    local function guarded(self, ...)
+      local ok, err = pcall(fn, self, ...)
+      if not ok then reportFailure(s, err) end
+    end
+    if ctx.gen == 2 and Shell and type(Shell.gen2Surface) == "function" then
+      Shell.gen2Surface(Theme, s, guarded)
+    else
+      s.draw = guarded
+    end
+  end
+
   local function harden(s)
     local baseDraw, baseUpdate = s.draw, s.update
-    local reported = false
-    local function report(err)
-      if reported then return end
-      reported = true
-      local msg = ("g9-gui: the %s dialog failed: %s")
-        :format(tostring(s.__kind), tostring(err)):gsub("%%", "%%%%")
-      if mod and mod.log then mod.log:warn(msg) end
-    end
+    local function report(err) reportFailure(s, err) end
     if baseDraw then
       s.draw = function(self, ...)
         local ok, err = pcall(baseDraw, self, ...)
@@ -130,8 +163,37 @@ return function(mod, ctx)
   -- ------------------------------------------------------------------ shared
   -- The save readout the SAVE card and the title's CONTINUE card both show:
   -- the engine's own PrintSaveScreenText / DisplayContinueGameInfo figures.
-  function D.saveRows(game)
-    local save = (game and game.save) or {}
+  -- `save` is the explicit snapshot when the caller has one (the title screen
+  -- reads the save it loaded, not the live game.save); it defaults to the live
+  -- one.
+  function D.saveRows(game, save)
+    save = save or (game and game.save) or {}
+    -- Gold's save carries a TABLE playTime ({hours, minutes, seconds, frames})
+    -- and reads its figures through src.core.gen2.Save.summary; Gen 1's is a
+    -- plain seconds count with a badge count and a dex set.  The shape is
+    -- checked as well as the boot, so a Gold-shaped save shown by an instance
+    -- built for Gen 1 (the harness shares one module) still reads correctly.
+    if ctx.gen == 2 or type(save.playTime) == "table" then
+      -- Gold's own read: src.core.gen2.Save.summary counts BOTH badge sets and
+      -- the dex the way the cart's DisplaySaveInfoOnContinue prints them.
+      local rows = {
+        { Strings("PLAYER"), (save.player and save.player.name) or "GOLD",
+          "ink" },
+        { Strings("BADGES"), " 0", "gold" },
+        { Strings("POK\xc3\xa9DEX"), "  0", "gold" },
+        { Strings("TIME"), "0:00", "gold" },
+      }
+      local ok, summary = pcall(function()
+        return require("src.core.gen2.Save").summary(save)
+      end)
+      if ok and summary then
+        rows[2][2] = ("%2d"):format(summary.badges or 0)
+        rows[3][2] = ("%3d"):format(summary.caught or 0)
+        rows[4][2] = ("%d:%02d"):format(summary.hours or 0,
+          summary.minutes or 0)
+      end
+      return rows
+    end
     local badges = 0
     pcall(function()
       badges = require("src.inventory.Badges").count(game.data, save)
@@ -157,6 +219,18 @@ return function(mod, ctx)
         background = opt("ui_background") ~= "false",
         embellishment = embellished() })
     else
+      -- The page below a float.  On Gen 1 the engine's own stack pass has
+      -- already drawn it (both states sit on the one 540x360 surface), so only
+      -- the dim is ours.  On Gold NOTHING else paints it -- Game2 gives the
+      -- window to the top widescreen state, which is this dialog -- so the
+      -- page's own repaint hook is called here, inside this dialog's page
+      -- transform (see ui/summary.lua's partyPageUnder for the same move).
+      if ctx.gen == 2 then
+        local under = state.__under
+        if under and type(under.__g9guiPage) == "function" then
+          under.__g9guiPage(under)
+        end
+      end
       Theme.set(C.black, 0.62)
       Theme.rect("fill", 0, 0, W, H, 0)
     end
@@ -226,10 +300,10 @@ return function(mod, ctx)
     }
     s.onAdvance, s.onCancel = spec.onAdvance, spec.onCancel
     s.__pause = spec.pause
-    s.draw = function(self)
+    setPaint(s, function(self)
       D.paintCard(self, game, { title = self.title, rows = self.rows,
         hints = self.hints })
-    end
+    end)
     s.update = function(self, dt)
       self.__t = (self.__t or 0) + 1
       local input = self.game.input
@@ -304,9 +378,9 @@ return function(mod, ctx)
     s.lines = lines(spec.message)
     s.index = spec.defaultNo and 2 or 1
     s.onChoose = spec.onChoose
-    s.draw = function(self)
+    setPaint(s, function(self)
       D.paintConfirm(self, game, { lines = self.lines, index = self.index })
-    end
+    end)
     s.update = function(self, dt)
       self.__t = (self.__t or 0) + 1
       local input = self.game.input
@@ -321,8 +395,16 @@ return function(mod, ctx)
         end
         return
       end
+      -- UP/DOWN cycle the two rows (the classic TextBox + ChoiceBox pair's own
+      -- keys); LEFT/RIGHT also work, and being the layout's own axis they are
+      -- DIRECTIONAL -- YES sits on the left of the card, NO on the right, so
+      -- LEFT picks YES and RIGHT picks NO rather than toggling blindly.
       if input:wasPressed("up") or input:wasPressed("down") then
         self.index = self.index == 1 and 2 or 1
+      elseif input:wasPressed("left") then
+        self.index = 1
+      elseif input:wasPressed("right") then
+        self.index = 2
       elseif input:wasPressed("a") then
         sfx(self.game, "Press_AB")
         self.pending = (self.index == 1)
@@ -396,10 +478,10 @@ return function(mod, ctx)
     s.icon = spec.icon
     s.auto = spec.auto
     s.onDone = spec.onDone
-    s.draw = function(self)
+    setPaint(s, function(self)
       D.paintNotice(self, game, { lines = self.lines, tone = self.tone,
         icon = self.icon, auto = self.auto, total = spec.auto })
-    end
+    end)
     s.update = function(self, dt)
       self.__t = (self.__t or 0) + 1
       if self.auto and self.auto > 0 then

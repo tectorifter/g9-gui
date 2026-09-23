@@ -143,6 +143,16 @@ return function(mod)
     -- 540x360 surface at 1:1).  See ui/portraits.lua's clip.
     local prev = Theme.page
     Theme.page = { scale = scale, ox = ox, oy = oy }
+    -- Publish the page's own fit for the rest of the frame.  Gold runs a
+    -- pushed TextBox through a SECOND pass at Chrome's integer letterbox (see
+    -- ui/textbox.lua's M.inPageSpace), and the only way that pass can put the
+    -- dialogue card on this page's pixels is to know the fit the page was just
+    -- drawn with -- the same numbers, straight from gen2Fit.  `self` identifies
+    -- the page so a box riding some other page is never given this one's fit.
+    if self and type(self.game) == "table" then
+      self.game.__g9guiPageFit = { self = self, scale = scale, ox = ox, oy = oy,
+        w = tonumber(winW) or S.W, h = tonumber(winH) or S.H }
+    end
     drawFn(self)
     Theme.page = prev
     if G.pop then G.pop() end
@@ -150,6 +160,17 @@ return function(mod)
   end
 
   function S.gen2Surface(Theme, self, drawFn)
+    -- The page is painted by :drawWidescreen, so the instance's NATIVE :draw
+    -- must never paint again.  Game2:drawScene resolves the wide layer as the
+    -- stack's TOP, or as its visible BASE when a non-wide state (a TextBox,
+    -- the GIVE/TAKE menu) sits above one -- and then runs stack:draw() from
+    -- that base up, which calls the taken-over screen's own classic :draw()
+    -- UNDER the modern page: the native party list showing through the
+    -- dialogue card, over the modern rails and portrait cards.  A no-op draw
+    -- is correct for every state on this contract: whenever it is the wide
+    -- layer it is painted by :drawWidescreen, and whenever it is drawn from
+    -- stack:draw() instead, the page above it is what should show.
+    self.draw = function() end
     self.drawsWidescreen = function() return true end
     self.wantsFillScale = function() return true end
     self.drawWidescreen = function(s, winW, winH)
@@ -179,7 +200,13 @@ return function(mod)
 
   function S.display(text)
     if type(text) ~= "string" or text == "" then return text end
-    local out = text:gsub("<([^%s<>]+)>", TOKENS)
+    -- charmap.asm $e1/$e2: "<PK>" + "<MN>" are TWO font glyphs whose shapes
+    -- spell "POKé" and "MON" -- the cart's Font.split matches the SEQUENCE, so
+    -- the pair is expanded first.  The single-token pass below cannot do it:
+    -- it would turn the two macros into a literal "PKMN" (which is what the
+    -- storage rails and BILL's PC prompts write, "WITHDRAW <PK><MN>").
+    local out = text:gsub("<PK><MN>", "POK\xc3\xa9MON")
+    out = out:gsub("<([^%s<>]+)>", TOKENS)
     -- charmap.asm $54: "#" prints POKe (the cart's "#MON"/"#DEX" macro).  Only
     -- a "#" introducing a capital is the macro; any other "#" is the literal.
     out = out:gsub("#(%u)", "POK\xc3\xa9%1")
@@ -237,15 +264,25 @@ return function(mod)
     -- the suite's row descriptions are short sentences, but that hint is long
     -- enough to be cut at body size, and a hint under a gold wallet reads fine
     -- one rung down.
-    local cap = S.display(opts.caption)
+    -- A caller with no second-line caption (the MODS page's list screen -- the
+    -- tab strip takes that line) passes nil, so it is coerced to the empty
+    -- string here: `Theme.w` measures through the real font, and a nil string
+    -- is an argument error in the cart, not a zero-width measurement.
+    local cap = S.display(opts.caption or "")
     local cf = opts.captionFont or F.body
+    local cbudget
     if opts.money then
       local mw = Theme.w(opts.money, F.bold)
       Theme.text(opts.money, S.W - m, S.CAP_Y, F.bold, "right", C.gold)
-      cap = Theme.fit(cap, cf, (S.W - m) - mw - 16 - leftX)
+      cbudget = (S.W - m) - mw - 16 - leftX
     else
-      cap = Theme.fit(cap, cf, (S.W - m) - leftX)
+      cbudget = (S.W - m) - leftX
     end
+    -- a caption too long for its budget steps a rung down (or two) before it is
+    -- cut, so a full sentence is never left on screen as a half-sentence
+    if Theme.w(cap, cf) > cbudget then cf = F.small end
+    if Theme.w(cap, cf) > cbudget then cf = F.tiny end
+    cap = Theme.fit(cap, cf, cbudget)
     if cap and cap ~= "" then
       Theme.text(cap, leftX, S.CAP_Y, cf, "left", C.inkDim)
     end
@@ -263,7 +300,7 @@ return function(mod)
       { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
       { key = "A", text = "OK" },
       { key = "B", text = "BACK" },
-    }, S.MARGIN, S.FOOT_Y, F.body, { gap = 24 })
+    }, S.MARGIN, S.FOOT_Y, F.body, { gap = opts.gap or 24 })
     if opts.right then
       -- The right readout (a transient notice, the party count) shares the
       -- footer line with the hint chips, so it is cut to what the chips left
@@ -404,10 +441,17 @@ return function(mod)
         if item.dim then ink = C.inkFaint
         elseif selected then ink = C.accent
         elseif band then ink = C.ink end
-        local label = Theme.fit(S.display(item.text or ""), F, budget)
-        Theme.text(label, lx, ry + 6, F, "left", ink)
+        local raw = S.display(item.text or "")
+        -- a label longer than the row steps down a rung (or two) before it is
+        -- cut, so a long species/form name is never left as a stub like
+        -- "MEGA CHARI…"
+        local lf = F
+        if Theme.w(raw, lf) > budget then lf = fonts.small end
+        if Theme.w(raw, lf) > budget then lf = fonts.tiny end
+        local label = Theme.fit(raw, lf, budget)
+        Theme.text(label, lx, ry + 6, lf, "left", ink)
         if selected then -- double-print for weight, like the START rail
-          Theme.text(label, lx + 1, ry + 6, F, "left", ink)
+          Theme.text(label, lx + 1, ry + 6, lf, "left", ink)
         end
         if item.right then
           Theme.text(S.display(item.right), x + w - rightPad, ry + 6, F, "right",
@@ -425,6 +469,140 @@ return function(mod)
     return x, y, w, row, scroll
   end
 
+  -- ---------------------------------------------------------------- popups
+  -- One card, one design: the PC's mon submenu, a PC's "How many?" stepper and
+  -- the YES/NO the engine pushes over a page are all this.  Every other modal
+  -- in the suite (the Gen 2 PC pages, the bag's own popups) draws the same
+  -- shape, so a popup anywhere in the game reads as one design instead of the
+  -- cart's little white square.
+  --
+  -- Callers draw it in PAGE space.  A pushed CLASSIC overlay is not in page
+  -- space: the engine centres the classic 160px UI inside a wide page by
+  -- translating it `S.pageOffset(game)` to the right (Game:draw's
+  -- classicOffset), so such a caller must undo that first -- see S.pageOffset.
+  local function embellishOn()
+    local o = mod and mod.options
+    if not (o and type(o.get) == "function") then return true end
+    local ok, v = pcall(o.get, o, "ui_embellishment")
+    return not (ok and tostring(v) == "false")
+  end
+
+  -- How far the engine has shifted a pushed classic overlay to the right
+  -- inside a wide page, in page pixels.  0 when there is nothing to undo -- a
+  -- classic 160px surface, or no renderer to ask.
+  function S.pageOffset(game)
+    local r = game and game.renderer
+    if not (r and type(r.uiSize) == "function") then return 0 end
+    local ok, uw = pcall(r.uiSize, r)
+    if not (ok and type(uw) == "number") then return 0 end
+    local off = math.floor((uw - 160) / 2)
+    return (off > 0) and off or 0
+  end
+
+  -- o = { w, title, right, lines, rows ({text, dim}), index, yesno (the
+  --       selected YES/NO row), yesnoLabels, more, hints, t }
+  -- `lines` are wrapped-free single body lines; `rows` is the cursor list.
+  -- `more` draws the page-advance cursor under the lines -- the modern
+  -- placeholder for the classic dialogue window's blinking tile arrow (the
+  -- page-space dialogue card ui/textbox.lua draws over a page of this suite).
+  function S.card(Theme, game, o)
+    o = o or {}
+    local C = Theme.col
+    local F = Theme.fonts(game)
+    local w = o.w or 380
+    local lines = o.lines or {}
+    local rows = o.rows or {}
+    local lh, rh = 26, 32
+    local yn = o.yesno and 2 or 0
+    local hintH = o.hints and 30 or 0
+    local h = 22 + (o.title and 34 or 0) + #lines * lh
+      + (o.more and 26 or 0)
+      + (o.stepper and 42 or 0)
+      + (#rows + yn) * rh + hintH + 12
+    local x = math.floor((S.W - w) * 0.5)
+    local y = math.floor((S.H - h) * 0.5)
+    -- the wash the Gen 2 popups lay down, so the page behind reads as
+    -- background rather than as text poking out either side of the card
+    Theme.set(C.black, 0.55)
+    Theme.rect("fill", 0, 0, S.W, S.H, 0)
+    Theme.panel(x, y, w, h, { radius = 8, shadow = 8,
+      color = C.panelLit, border = C.borderLit })
+    if embellishOn() then
+      Theme.brackets(x + 5, y + 5, w - 10, h - 10, 18, C.accentDim)
+    end
+    local ty = y + 17
+    if o.title then
+      Theme.text(Theme.fit(o.title, F.small, w - 62), x + 18, ty, F.small,
+        "left", C.accent)
+      if o.right then
+        Theme.text(Theme.fit(o.right, F.small, w * 0.45), x + w - 18, ty,
+          F.small, "right", C.gold)
+      end
+      Theme.rule(x + 14, ty + 20, w - 28, C.border)
+      ty = ty + 34
+    end
+    for _, line in ipairs(lines) do
+      Theme.text(Theme.fit(line, F.body, w - 40), x + 20, ty, F.body, "left",
+        C.ink)
+      ty = ty + lh
+    end
+    if o.more then
+      -- The page-advance cursor, where the classic window's tile arrow sat: a
+      -- breathing down-chevron at the card's bottom right.  It is the same
+      -- cursor ui/textbox.lua draws on a classic surface (the card's own
+      -- `cursor`), so a continuing message reads the same on both.
+      local cx, cy = x + w - 26, ty + 5
+      Theme.set(C.accent,
+        0.55 + 0.45 * (0.5 + 0.5 * math.sin((o.t or 0) * 0.22)))
+      love.graphics.polygon("fill", cx - 9, cy - 5, cx + 9, cy - 5, cx, cy + 6)
+      ty = ty + 26
+    end
+    if o.stepper then
+      -- The engine's "How many?" selector (DisplayChooseQuantityMenu): a value
+      -- the UP/DOWN keys step, the arrows stacked beside it -- drawn pointing
+      -- UP and DOWN because UP/DOWN is what steps it -- and, in a mart, the
+      -- running price.
+      local st = o.stepper
+      local ax, ay = x + 30, ty + 6
+      Theme.set(C.accent)
+      love.graphics.polygon("fill", ax, ay + 7, ax + 12, ay + 7, ax + 6, ay)
+      love.graphics.polygon("fill", ax, ay + 21, ax + 12, ay + 21, ax + 6,
+        ay + 28)
+      Theme.text(st.value or "", x + 62, ty + 8, F.bold, "left", C.accent)
+      if st.right then
+        Theme.text(Theme.fit(st.right, F.body, w * 0.4), x + w - 18, ty + 8,
+          F.body, "right", C.gold)
+      end
+      ty = ty + 42
+    end
+    local function drawRow(label, on, dim)
+      local label2 = Theme.fit(label or "", F.body, w - 74)
+      if on then
+        Theme.set(C.rowLit, 0.55)
+        Theme.rect("fill", x + 12, ty - 3, w - 24, 28, 5)
+        Theme.chevrons(x + 22, ty + 4, 18, C.accent,
+          0.5 + 0.5 * math.sin((o.t or 0) * 0.18))
+      end
+      Theme.text(label2, x + 52, ty + 1, F.body, "left",
+        on and C.accent or (dim and C.inkFaint or C.ink))
+      if on then -- double-print for weight, like the rails
+        Theme.text(label2, x + 53, ty + 1, F.body, "left", C.accent)
+      end
+      ty = ty + rh
+    end
+    for i, r in ipairs(rows) do
+      drawRow(r.text, i == (o.index or 1), r.dim)
+    end
+    if o.yesno then
+      local labels = o.yesnoLabels or { "YES", "NO" }
+      for i = 1, 2 do drawRow(labels[i], i == o.yesno) end
+    end
+    if o.hints then
+      Theme.hints(o.hints, x + 18, y + h - 18, F.small, { gap = 16 })
+    end
+    return x, y, w, h
+  end
+
   -- ------------------------------------------------------------ start rows
   -- The START menu's own row labels, built through the engine's StartMenu so
   -- the POKeDEX row (gated on Oak's gift), MODS (gated on a discovered mod)
@@ -440,6 +618,30 @@ return function(mod)
   -- src.ui.StartMenu or Gold's src.ui.gen2.StartMenu (which carries one row
   -- Gen 1's does not -- POKeGEAR).  A single game table boots one generation,
   -- so one cache slot per game is enough.
+  -- The synthetic PC row's label.  Shared by the START rail (ui/start_menu.lua)
+  -- and the rail mirror below, so the two halves of the spread agree.
+  S.PC_ROW_LABEL = "PC"
+
+  -- Where the synthetic PC row belongs: the label it follows, or nil when the
+  -- ui_pc_row option is off.  ui/start_menu.lua records this on `game` as it
+  -- builds the START rail; the fallback recomputes it for a POKeMON page that
+  -- is somehow reached without the START menu having been built first (a mod's
+  -- own entry), so the two rails stay identical either way.
+  function S.pcRowAfter(game, gen)
+    if type(game) == "table" and game.__g9guiPcRowAfter ~= nil then
+      return game.__g9guiPcRowAfter
+    end
+    local onOpt = false
+    if mod and mod.options and type(mod.options.get) == "function" then
+      local ok, v = pcall(mod.options.get, mod.options, "ui_pc_row")
+      onOpt = ok and tostring(v) == "true"
+    end
+    if not onOpt then return nil end
+    local ok, Strings = pcall(require, "src.core.Strings")
+    if not (ok and type(Strings) == "function") then return nil end
+    return Strings((gen == 2) and "PACK" or "ITEM")
+  end
+
   function S.startRows(game, partyLabel, gen)
     if type(game) ~= "table" then return nil end
     if game.__g9guiStartRows then return game.__g9guiStartRows end
@@ -452,6 +654,14 @@ return function(mod)
     local rows = {}
     for i, item in ipairs(menu.items or {}) do
       if item.label ~= partyLabel then rows[#rows + 1] = item.label end
+    end
+    -- Mirror the START rail's synthetic PC row (ui_pc_row): the row is not one
+    -- the engine built, so this is the only way this rail learns about it.
+    local after = S.pcRowAfter(game, gen)
+    if after then
+      local at
+      for i = 1, #rows do if rows[i] == after then at = i break end end
+      table.insert(rows, (at or #rows) + 1, S.PC_ROW_LABEL)
     end
     if #rows == 0 then return nil end
     game.__g9guiStartRows = rows

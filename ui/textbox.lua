@@ -85,23 +85,63 @@
 -- code->character table to drift out of sync with the game's charmap, and a
 -- multi-byte glyph like é is never torn in half.
 --
--- GEN 2 (since 2.5.5).  src.render.TextBox is ONE shared class -- Gold's
--- Game2.lua requires the same module -- and it draws its window at boxTx*8,
--- boxTy*8 in the classic 160x144 screen space on both generations, so this
--- module dresses it identically.  What differs is the space: Game2 has no
--- `renderer` table at all (so no frameRects) and rolls its own frame in
--- src/core/Game2.lua, so `screenRects` always returns nil and EVERY Gold box
--- takes the surface path -- the same dark card, her Saira-10 body and pulsing
--- chevron, composed at 1:1 in the 160x144 space that Gold then blits at its
--- own zoom/fit scale.  The window-space density half (fonts built at the
--- window's native scale, one-physical-pixel hairlines) is therefore a Gen 1
--- only path; on Gold installHook still subscribes render.hud (Game2 raises it)
--- but hudDraw bails on the first frame, so a Gold boot is never worse than the
--- surface card.  The re-flow wrap is class-level and works on both.
+-- OVER A PAGE OF THIS SUITE (2.8.4).  The engine's Game:draw only knows two
+-- kinds of state: the one that owns the surface (a :uiSize() page or a wide
+-- battle) and the classic 160x144 overlays, which it centres inside a wide
+-- surface by translating them `classicOffset` = (uiSize - 160) / 2 to the
+-- right.  A TextBox pushed over one of this suite's 540x360 pages is such an
+-- overlay -- so the cart's white 20x6 window used to land mid-page, floating
+-- over the modern list (the PC's "Accessed someone's PC." was the last one).
+-- Since 2.8.4 the push wrapper DRESSES that box too, and this module paints
+-- its message as the suite's own CARD in the PAGE's coordinates: it undoes the
+-- engine's shift and calls ui/shell.lua's S.card -- the very centred card the
+-- YES/NO over a page (ui/choice.lua) and the Gold PC's own messages
+-- (ui/pc.lua g2modal) already use, so a message anywhere in the suite reads as
+-- one design.  A YES/NO the engine pushes over such a box carries the message
+-- itself (ui/choice.lua reads M.pageLines), so the pair draws ONE card.  The
+-- wallet card is not drawn there: this suite's pages carry the wallet in their
+-- own header.  `surfaceIsWide` still refuses a battle's own 304px surface and
+-- any other mod's wide screen -- those are not in this suite's page
+-- coordinates and keep the classic window.
+--
+-- ...AND ON GOLD.  The Gen 1 half of that page card works because the engine
+-- blits the page into a real 540x360 surface and then shifts this box's classic
+-- rectangle into it by `classicOffset` -- an offset this module can undo.  Gold
+-- has neither: the page is painted straight into the window by :drawWidescreen
+-- (ui/shell.lua's gen2Fit, which now publishes the fit it used on the game) and
+-- the engine THEN re-runs the stack over it at Chrome's own integer letterbox,
+-- which is the pass a pushed TextBox draws in.  That is two scales in one
+-- frame, so the box used to be painted as the cart's card at the classic
+-- scale -- several times the page's, and in the cart's face -- over the modern
+-- page (the plain message over the Gen 2 move learner).  `M.inPageSpace` maps
+-- the PAGE's coordinates into that classic pass, so the same S.card lands on
+-- exactly the pixels gen2Fit put the page on and a Gold message reads as the
+-- page's own card, at the page's own size.
+--
+-- GEN 2 (since 2.5.5; native since 2.6.7).  src.render.TextBox is ONE shared
+-- class -- Gold's Game2.lua requires the same module -- and it draws its window
+-- at boxTx*8, boxTy*8 in the classic 160x144 screen space on both generations,
+-- so this module dresses it identically.  What differs is the space.  Gold has
+-- no `renderer` table at all, so the Gen 1 rects are unavailable -- but
+-- Game2:drawScene blits the classic 160x144 UI canvas at the plain integer
+-- letterbox fit (Chrome.fitScale/fitOrigin) and Game2:viewport hands that very
+-- mapping to the render.hud payload as gameX/gameY/scale.  That is all the
+-- window-space path needs, so since 2.6.7 Gold takes it too (`gen2Space`): the
+-- same dark card, her body and pulsing chevron, but rasterised straight into
+-- the window at that scale from fonts built for it -- the same density Gen 1
+-- gets, instead of a Saira-10 body composed at 1:1 in the 160x144 canvas and
+-- then upscaled with it.  Two cases keep the surface card: a hook payload with
+-- no usable mapping, and a box over a WIDE page (Game2 panelBlits that stack at
+-- the PAGE's scale, not the letterbox -- see `wideUnder`).  The re-flow wrap is
+-- class-level and works on both.
 return function(mod, ctx)
   local Theme = ctx.Theme
   local C = Theme.col
   local embellish = ctx.on and ctx.on("ui_embellishment")
+  -- The page helpers (S.card / S.pageOffset / S.W): a box over one of this
+  -- suite's own pages is drawn as that page's card.  Optional, like everything
+  -- else -- without it every box keeps the surface card.
+  local Shell = ctx.Shell
 
   local Font
   do
@@ -117,6 +157,15 @@ return function(mod, ctx)
   do
     local ok, v = pcall(require, "src.core.Game")
     Game = ok and v or nil
+  end
+  -- Gold's own integer letterbox (src/ui/gen2/Chrome.lua), only so a card that
+  -- belongs on a Gen 2 page can be mapped into the classic overlay pass the
+  -- engine runs that page's pushed states through (see M.inPageSpace).  Gen 1
+  -- has no such module, so the pcall leaves it nil there.
+  local Chrome
+  do
+    local ok, v = pcall(require, "src.ui.gen2.Chrome")
+    Chrome = ok and v or nil
   end
   -- The engine's YES/NO box, only so a box sitting on top of the dialogue box
   -- can be told apart from a state that replaced it.  It is NOT re-skinned:
@@ -532,18 +581,61 @@ return function(mod, ctx)
     return nil
   end
 
-  -- True when a wide surface (a battle composing its own screen, or one of
-  -- this mod's 540x360 pages) is under the box.  There the engine centres the
-  -- classic 160px UI inside the wide canvas and the box must keep the classic
-  -- look -- the battle scene dresses its own message window, and a card
-  -- pulled out of the surface's coordinate space would land in the wrong
-  -- place.
-  function M.surfaceIsWide(state)
+  -- The wide state under the box, if any.  Game.wideBattleInStack matches ANY
+  -- state answering :isWideBattleLayout(), and that is not only a battle:
+  -- this suite's own 540x360 pages answer it too (ui/shell.lua S.wide), and so
+  -- does any other mod's wide screen.
+  local function wideStateUnder(state)
     local game = state and state.game
     local stack = game and game.stack
-    if not (Game and stack) then return false end
+    if not (Game and stack) then return nil end
     local ok, wide = pcall(Game.wideBattleInStack, stack)
-    return ok and wide ~= nil
+    if not ok then return nil end
+    return wide
+  end
+
+  -- True when a wide surface that is NOT one of this suite's own pages is under
+  -- the box: a battle composing its own screen, or another mod's wide screen.
+  -- There the engine centres the classic 160px UI inside the wide canvas and
+  -- the box must keep the classic look -- the battle scene dresses its own
+  -- message window, and a card pulled out of the surface's coordinate space
+  -- would land in the wrong place.  A page of THIS suite (every takeover here
+  -- marks its instance `__g9gui`) is different: it is drawn by the suite, so
+  -- the box is dressed and its message painted as the suite's card in the
+  -- PAGE's coordinates (see `paintPageCard`).
+  function M.surfaceIsWide(state)
+    local wide = wideStateUnder(state)
+    if wide == nil then return false end
+    if type(wide) == "table" and wide.__g9gui == true then return false end
+    return true
+  end
+
+  -- The page of THIS suite a box is riding, or nil.  The same wide state
+  -- surfaceIsWide asks about, kept only when it is one of ours (`__g9gui`): a
+  -- battle's surface or another mod's page answers nil here and keeps the
+  -- classic window.  On Gen 1 such a box is drawn in the PAGE's own surface
+  -- (M.draw's `pageOffset` half); Gold has neither a renderer nor a shift -- the
+  -- page paints the whole window through ui/shell.lua's gen2Fit and the engine
+  -- re-runs the stack over it at Chrome's integer letterbox -- so the box is
+  -- mapped into that pass instead (M.inPageSpace).
+  function M.pageUnder(state)
+    local wide = wideStateUnder(state)
+    if type(wide) == "table" and wide.__g9gui == true then return wide end
+    return nil
+  end
+
+  -- How far the engine has shifted a pushed CLASSIC overlay to the right inside
+  -- a wide page (Game:draw's classicOffset), in page pixels.  This suite's page
+  -- is exactly 540 wide, so the shift is (540 - 160) / 2 = 190 -- the same test
+  -- ui/choice.lua uses to tell this suite's page from a battle's 304px surface
+  -- (offset 72), whose classic overlays keep the classic drawing.  0 when there
+  -- is nothing to undo: a classic surface, or no renderer to ask (Gold).
+  local function pageOffset(game)
+    if not (Shell and Shell.pageOffset and Shell.W) then return 0 end
+    local ok, off = pcall(Shell.pageOffset, game)
+    if not (ok and type(off) == "number" and off > 0) then return 0 end
+    if off ~= math.floor((Shell.W - 160) / 2) then return 0 end
+    return off
   end
 
   -- Does the renderer leave the box's region in the classic letterbox this
@@ -570,15 +662,224 @@ return function(mod, ctx)
     return R.uox, R.vuy + R.vuh - R.uih * R.Uy
   end
 
-  -- Everything the window-space path needs from the renderer.  Returns nil
-  -- whenever the surface path is the correct one, so both the draw-time skip
-  -- and the hook share one decision.
-  local function screenRects(state, game)
-    if not hudSeen then return nil end
+  -- The engine's own renderer, when this boot has one.  Gold does not: it
+  -- composes and presents its own frame in src/core/Game2.lua, so the Gen 1
+  -- rects do not exist there and Gold reads the render.hud viewport instead
+  -- (see `gen2Space`).
+  local function gen1Renderer(game)
     local r = game and game.renderer
-    if type(r) ~= "table" or type(r.frameRects) ~= "function" then return nil end
-    if M.surfaceIsWide(state) then return nil end
-    return r
+    if type(r) == "table" and type(r.frameRects) == "function" then return r end
+    return nil
+  end
+
+  -- GEN 2's window space.  Game2:drawScene blits the classic 160x144 UI canvas
+  -- at the plain integer letterbox fit -- Chrome.fitScale/fitOrigin, the same
+  -- whole-number scale Gen 1's CENTERED layout uses -- and Game2:viewport hands
+  -- that very mapping to the render.hud payload as gameX/gameY/scale.  So the
+  -- card can be rasterised natively on Gold too, from fonts built at that scale
+  -- exactly as on Gen 1, instead of being composed in the 160x144 canvas and
+  -- upscaled with it.  `scale` here is LOVE units per GB pixel, the same unit
+  -- Gen 1's Ux/Uy carry, so the two generations build the same font sizes.
+  --
+  -- Two cases keep the surface card:
+  --   * no usable viewport (an engine whose render.hud payload lacks the
+  --     mapping, or a direct test call with none) -- the surface card always
+  --     exists, so the box can never disappear;
+  --   * a WIDE page under the box.  Game2 presents a stack with a widescreen
+  --     base through panelBlit, i.e. at the PAGE's scale rather than the
+  --     letterbox, so the card's UI-pixel geometry no longer maps through
+  --     gameX/gameY/scale.  (`M.surfaceIsWide` covers the Gen 1 wide battle;
+  --     `wideUnder` covers Gold's own widescreen pages.)
+  local gen2Live = false
+
+  -- Is another state on the stack painting a widescreen page?  If so the box
+  -- travels through Game2's panelBlit and must stay on the surface.
+  local function wideUnder(state, game)
+    local stack = game and game.stack
+    local states = stack and stack.states
+    if not states then return false end
+    for i = #states, 1, -1 do
+      local s = states[i]
+      if s ~= state and type(s) == "table"
+          and type(s.drawsWidescreen) == "function" then
+        local ok, wide = pcall(s.drawsWidescreen, s)
+        if ok and wide then return true end
+      end
+    end
+    return false
+  end
+
+  local function gen2Space(state, game, viewport)
+    if wideUnder(state, game) then return nil end
+    local vp = viewport
+    if type(vp) ~= "table" then return nil end
+    local k = tonumber(vp.scale)
+    local ox, oy = tonumber(vp.gameX), tonumber(vp.gameY)
+    if not (k and k > 0 and ox and oy) then return nil end
+    local dpi = math.max(tonumber(vp.dpiX) or 1, tonumber(vp.dpiY) or 1)
+    if dpi <= 1e-6 then dpi = 1 end
+    return { fonts = Theme.fontsAt(game, k), ox = ox, oy = oy,
+      kx = k, ky = k, hair = 1 / dpi }
+  end
+
+  -- The message lines the box is showing right now, for the page card -- and
+  -- for ui/choice.lua's card, which carries the question the box is asking: a
+  -- YES/NO over a page is ONE card with the message and the two rows, the way
+  -- the Gold PC draws its own confirms.
+  function M.pageLines(state)
+    local out = {}
+    for _, line in ipairs(visibleLines(state)) do
+      if line ~= "" then out[#out + 1] = line end
+    end
+    if #out == 0 then out[1] = "" end
+    return out
+  end
+
+  -- The card for a box over one of this suite's own pages, in the PAGE's own
+  -- coordinates.  The engine shifted the classic overlay right by `off`
+  -- (Game:draw's classicOffset), so undoing that puts us back in page space,
+  -- where ui/shell.lua's S.card places the suite's centred card -- the same
+  -- card the YES/NO over a page and the Gold PC's own messages already use.
+  -- S.card also lays the wash, which is what makes the message legible over
+  -- the list behind it.
+  local function paintPageCard(state, off)
+    local game = state.game
+    local more = false
+    if type(state.arrowVisible) == "function" then
+      local ok, v = pcall(state.arrowVisible, state)
+      more = ok and v == true
+    end
+    local g = love.graphics
+    if g.push then g.push() end
+    if g.translate then g.translate(-off, 0) end
+    local ok, err = pcall(Shell.card, Theme, game, {
+      lines = M.pageLines(state), w = 420, more = more,
+      hints = { { key = "A", text = "OK" } },
+      t = state.__t or 0,
+    })
+    if g.pop then g.pop() end
+    if not ok then
+      error("g9-gui: the page-space dialogue card failed: "
+        .. tostring(err), 0)
+    end
+  end
+
+  -- GOLD's half of the page card (see M.pageUnder).  Game2 paints a
+  -- widescreen base with :drawWidescreen(w, h) -- this suite's page through
+  -- ui/shell.lua's gen2Fit, which publishes that fit on the game -- and then
+  -- re-runs the stack through Chrome's integer letterbox
+  -- (Game2:drawScene -> panelBlit -> Chrome.fitScale/fitOrigin), which is the
+  -- pass a pushed TextBox draws in.  The two are one frame at two scales, so
+  -- page pixels map into the classic pass through
+  --   classic = (pageOrigin - classicOrigin + page * pageScale) / classicScale
+  -- and `fn` -- a painter written in the PAGE's coordinates -- lands on exactly
+  -- the pixels gen2Fit put the page on.  Returns false, leaving the caller its
+  -- surface card, whenever the frame cannot be described: no page fit
+  -- published, a fit left over from another page, or an engine without Chrome.
+  function M.inPageSpace(game, page, fn)
+    local fit = game and game.__g9guiPageFit
+    if type(fit) ~= "table" or (page and fit.self ~= page) then return false end
+    if not (Chrome and type(Chrome.fitScale) == "function"
+        and type(Chrome.fitOrigin) == "function") then return false end
+    local w, h = tonumber(fit.w), tonumber(fit.h)
+    local ps, pox, poy = tonumber(fit.scale), tonumber(fit.ox), tonumber(fit.oy)
+    if not (w and h and ps and ps > 0 and pox and poy) then return false end
+    local okS, cs = pcall(Chrome.fitScale, w, h)
+    if not (okS and type(cs) == "number" and cs > 0) then return false end
+    local okO, cox, coy = pcall(Chrome.fitOrigin, w, h, cs)
+    if not (okO and type(cox) == "number" and type(coy) == "number") then
+      return false
+    end
+    local g = love.graphics
+    local pushed = false
+    if g and g.push then pushed = pcall(g.push) end
+    if g and g.translate then
+      pcall(g.translate, (pox - cox) / cs, (poy - coy) / cs)
+    end
+    if g and g.scale then pcall(g.scale, ps / cs, ps / cs) end
+    local ok, err = pcall(fn)
+    if pushed and g and g.pop then pcall(g.pop) end
+    if not ok then
+      error("g9-gui: the Gold page-space dialogue card failed: "
+        .. tostring(err), 0)
+    end
+    return true
+  end
+
+  -- True when the state on top of the stack is the engine's YES/NO box: the
+  -- box under it must then stand down, because that box's card already carries
+  -- this message (ui/choice.lua reads M.pageLines) and two cards over one page
+  -- would stack.
+  local function choiceOverTop(game)
+    local stack = game and game.stack
+    local states = stack and stack.states
+    local top = states and states[#states]
+    return isChoiceBox(top)
+  end
+
+  -- The window space the dialogue card is painted in this frame, or nil when
+  -- the surface card is the right one.  One entry point for the two callers
+  -- that must agree: M.hudDraw (which paints the card) and ui/choice.lua
+  -- (which paints the choice box riding the same canvas -- it asks for this
+  -- very space, so the pair can never disagree about where UI pixels land).
+  --
+  -- Gen 1 reads the renderer's own rects; Gold has no renderer, so it reads
+  -- the render.hud viewport payload.  Both refuse a WIDE surface under the
+  -- box (there the classic UI is centred inside the wide canvas -- Gen 1's
+  -- battle -- or panelBlit at the page's scale -- Gold's own widescreen
+  -- pages), because the card's UI-pixel geometry no longer maps through a
+  -- single origin.
+  function M.hudSpace(state, game, viewport)
+    if state and M.surfaceIsWide(state) then return nil end
+    -- ...and a box over one of this suite's own pages takes the page card in
+    -- M.draw instead: its geometry is in PAGE pixels, not the classic 20x6
+    -- tiles, so the window space below would put it in the wrong place.
+    if pageOffset(game) > 0 then return nil end
+    local r = gen1Renderer(game)
+    if r then
+      local okR, R = pcall(r.frameRects, r)
+      if not (okR and type(R) == "table") then return nil end
+      local kx, ky = R.Ux, R.Uy
+      if type(kx) ~= "number" or type(ky) ~= "number" or kx <= 0 or ky <= 0
+          or type(R.uox) ~= "number" or type(R.uoy) ~= "number" then
+        return nil
+      end
+      local docked = not letterboxed(r)
+      if docked and not (type(R.vuy) == "number" and type(R.vuh) == "number"
+          and type(R.uih) == "number") then
+        -- a renderer that cannot answer where the window is cannot be trusted
+        -- to say where the docked region lands; the surface card draws instead
+        return nil
+      end
+      local dpi = math.max(R.dpiX or 1, R.dpiY or 1)
+      local fonts = Theme.fontsAt(game, ky)
+      local ox, oy = spaceOrigin(r, R)
+      local sp = { fonts = fonts, ox = ox, oy = oy, kx = kx, ky = ky,
+        hair = 1 / dpi }
+      if docked then
+        -- The box region is docked this frame, so the un-anchored MONEY card
+        -- stays up in the letterbox while the card itself travels down to the
+        -- window's bottom edge (see `spaceOrigin`).
+        sp.money = { fonts = fonts, ox = R.uox, oy = R.uoy, kx = kx, ky = ky,
+          hair = 1 / dpi }
+      end
+      return sp
+    end
+    return gen2Space(state, game, viewport)
+  end
+
+  -- Will the render.hud half paint this box this frame?  Gen 1 answers from the
+  -- renderer; Gold has none, so it stands on the hook having run once and left
+  -- a usable letterbox (`gen2Live`, set by M.hudDraw).  Anything else is "no",
+  -- which leaves the box on the surface card -- it can never vanish.
+  local function hudWillPaint(state, game)
+    if not hudSeen then return false end
+    if M.surfaceIsWide(state) then return false end
+    -- ...and over one of this suite's own pages the page card is the painter
+    -- (see paintPageCard): the window-space half would draw a second card.
+    if pageOffset(game) > 0 then return false end
+    if gen1Renderer(game) then return true end
+    return gen2Live and not wideUnder(state, game)
   end
 
   function M.draw(state)
@@ -586,20 +887,63 @@ return function(mod, ctx)
       return
     end
     local game = state.game
-    -- Keep the engine's edge anchor: in UI LAYOUT = DYNAMIC the renderer
-    -- docks this region to the window's bottom edge; in CENTERED (the
-    -- default) it is a no-op.  The region is the classic box, which contains
-    -- the card.
+    -- Over one of this suite's own pages the card is drawn in the PAGE's
+    -- coordinates (below), so the engine must NOT be handed the classic edge
+    -- anchor: under UI LAYOUT = DYNAMIC the renderer would lift that classic
+    -- rectangle out of the page blit and blit it against the window edge --
+    -- a white hole where the 20x6 tiles were, plus a detached slice of the
+    -- modern page down at the window's bottom.  The page owns the surface;
+    -- there is nothing to dock.
+    local off = pageOffset(game)
     local r = game and game.renderer
-    if r and r.setUIAnchor then
+    if off <= 0 and r and r.setUIAnchor then
+      -- Keep the engine's edge anchor: in UI LAYOUT = DYNAMIC the renderer
+      -- docks this region to the window's bottom edge; in CENTERED (the
+      -- default) it is a no-op.  The region is the classic box, which contains
+      -- the card.
       r:setUIAnchor((state.boxTx or 0) * 8, (state.boxTy or 12) * 8,
         (state.boxTw or 20) * 8, (state.boxTh or 6) * 8, "bottom")
     end
     -- The window-space card for this frame is drawn by the render.hud hook,
     -- after the frame's composite; drawing it here as well would double the
     -- translucent panel under it.
-    local hudRects = screenRects(state, game)
-    if hudRects and state == activeBox(game) then return end
+    if state == activeBox(game) and hudWillPaint(state, game) then return end
+
+    -- Over one of this suite's own pages the cart's window is not on offer at
+    -- all: the engine has shifted this classic overlay right by classicOffset,
+    -- so the message is painted as the suite's card in the PAGE's coordinates
+    -- instead.  A YES/NO the engine pushed over this box already carries the
+    -- message (ui/choice.lua), so the box stands down and the pair draws one
+    -- card rather than two.
+    if off > 0 then
+      if not choiceOverTop(game) then paintPageCard(state, off) end
+      Theme.set(C.white)
+      return
+    end
+
+    -- GOLD's half of the same answer.  There is no renderer to undo a shift
+    -- for -- the page paints the whole window through ui/shell.lua's gen2Fit --
+    -- and the engine's classic overlay pass draws this box at Chrome's integer
+    -- letterbox, several times the page's own scale, so the cart's window used
+    -- to land on a modern page as a huge chunky box in the cart's face (the
+    -- user's report: the plain TextBox over the Gen 2 move learner).  The card
+    -- is mapped into that pass instead (M.inPageSpace), so the message reads as
+    -- the page's own card.  A YES/NO the engine pushed over this box already
+    -- carries the message (ui/choice.lua), so the box stands down and the pair
+    -- draws one card rather than two -- the Gen 1 half's contract exactly.
+    local page = M.pageUnder(state)
+    if page and gen1Renderer(game) == nil then
+      local over = choiceOverTop(game)
+      local drew = false
+      if not over then
+        drew = M.inPageSpace(game, page,
+          function() paintPageCard(state, 0) end)
+      end
+      if drew or over then
+        Theme.set(C.white)
+        return
+      end
+    end
 
     paint(state, surfaceSpace(game))
     Theme.set(C.white)
@@ -611,36 +955,14 @@ return function(mod, ctx)
   -- directly.
   function M.hudDraw(game, viewport)
     hudSeen = true
+    gen2Live = false
     local box = activeBox(game)
     if not box then return end
-    local r = screenRects(box, game)
-    if not r then return end
-    local okR, R = pcall(r.frameRects, r)
-    if not (okR and type(R) == "table") then return end
-    local kx, ky = R.Ux, R.Uy
-    if type(kx) ~= "number" or type(ky) ~= "number" or kx <= 0 or ky <= 0
-        or type(R.uox) ~= "number" or type(R.uoy) ~= "number" then
-      return
-    end
-    local docked = not letterboxed(r)
-    if docked and not (type(R.vuy) == "number" and type(R.vuh) == "number"
-        and type(R.uih) == "number") then
-      -- a renderer that cannot answer where the window is cannot be trusted
-      -- to say where the docked region lands; the surface card draws instead
-      return
-    end
-    local dpi = math.max(R.dpiX or 1, R.dpiY or 1)
-    local fonts = Theme.fontsAt(game, ky)
-    local ox, oy = spaceOrigin(r, R)
-    local sp = { fonts = fonts, ox = ox, oy = oy, kx = kx, ky = ky,
-      hair = 1 / dpi }
-    if not letterboxed(r) then
-      -- The box region is docked this frame, so the un-anchored MONEY card
-      -- stays up in the letterbox while the card itself travels down to the
-      -- window's bottom edge (see `spaceOrigin`).
-      sp.money = { fonts = fonts, ox = R.uox, oy = R.uoy, kx = kx, ky = ky,
-        hair = 1 / dpi }
-    end
+    local sp = M.hudSpace(box, game, viewport)
+    if not sp then return end
+    -- Latching `gen2Live` on Gold is what lets M.draw stand down next frame --
+    -- exactly the role `frameRects` plays on Gen 1 (see `hudWillPaint`).
+    gen2Live = gen1Renderer(game) == nil
     local g = love.graphics
     local pushed = false
     if g and g.push then
