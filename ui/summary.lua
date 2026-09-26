@@ -46,6 +46,18 @@ return function(mod, ctx)
   local Gen2 = ctx.gen == 2
   -- the shared page (surface fit/scale), used by the Gen 2 widescreen arm only
   local Shell = ctx.Shell
+  -- The modern-content translation layer (ui/translation.lua; nil when the
+  -- feature is off or no catalog was found).  Ability NAMES are the one thing
+  -- with no content registry to patch, so they are translated here at draw
+  -- time; species / move / item names already arrive translated on the record.
+  local Translation = ctx.Translation
+  local function abilityName(v)
+    if Translation and type(Translation.ability) == "function" then
+      local ok, t = pcall(Translation.ability, v)
+      if ok and type(t) == "string" then return t end
+    end
+    return v
+  end
 
   local M = {}
   local Stats = require("src.pokemon.Stats")
@@ -292,7 +304,7 @@ return function(mod, ctx)
       tl[i] = (ok and d) or tostring(types[i])
     end
     local rows = {
-      { "ABIL", safeText(mon.ability) },
+      { "ABIL", safeText(abilityName(mon.ability)) },
       { "NAT", safeText(mon.nature) },
       { "TYPE", #tl > 0 and table.concat(tl, " / ") or NONE },
       { "ITEM", safeText(mon.item) },

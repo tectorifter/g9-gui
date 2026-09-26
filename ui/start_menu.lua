@@ -540,24 +540,14 @@ return function(mod, ctx)
     local rail = railState(self)
     local cur = (rail.items or {})[rail.index]
     local caption = cur and (CAPTION2[cur.value] or CAPTION2[cur.label])
-    local right = ("BADGES %d  %s  DEX %d"):format(badges2(game), clock(game),
-      owned(game))
+    local right = ("%s %d  %s  %s %d"):format(Shell.ui("BADGES"), badges2(game),
+      clock(game), Shell.ui("DEX"), owned(game))
     Shell.top(Theme, game, {
       title = Strings("MENU"),
       right = right,
       caption = caption,
       money = Shell.money(game),
       embellish = embellish,
-    })
-
-    -- Gold's rail carries one row Gen 1's does not -- POKeGEAR, 115px at the
-    -- body size against the Gen 1 rail's 112px label budget -- so the Gen 2
-    -- rail is a few pixels wider with a tighter chevron gutter, and it still
-    -- stops short of the roster's card column (ROSTER_X + CARD_X).
-    Shell.rows(Theme, game, {
-      items = rail.items, index = rail.index, scroll = rail.scroll,
-      maxVisible = rail.maxVisible, t = self.__t or 0,
-      w = 158, labelPad = 32,
     })
 
     local party = (game.save and game.save.party) or {}
@@ -573,13 +563,27 @@ return function(mod, ctx)
       portraits = Portraits,
     })
 
+    -- Gold's rail carries one row Gen 1's does not -- POKeGEAR, 115px at the
+    -- body size against the Gen 1 rail's 112px label budget -- so the Gen 2
+    -- rail is a few pixels wider with a tighter chevron gutter, and it still
+    -- stops short of the roster's card column (ROSTER_X + CARD_X).  Gold's
+    -- START menu grows past the eight rows that fit the band (POKeGEAR plus
+    -- whatever the ui.start_menu.items hook adds), so the rail WRAPS into
+    -- columns (ui/shell.lua S.rows) rather than drawing under the footer; the
+    -- cursor's column is the one that grows, and the extra column is painted
+    -- over the roster like this page's own action popup.
+    Shell.rows(Theme, game, {
+      items = rail.items, index = rail.index, t = self.__t or 0,
+      w = 158, labelPad = 32, columns = true, cap = 8,
+    })
+
     Shell.footer(Theme, game, {
       hints = {
         { key = "\xe2\x86\x90\xe2\x86\x92", text = "POK\xc3\xa9MON" },
         { key = "A", text = "OK" },
         { key = "B", text = "CLOSE" },
       },
-      right = ("PARTY %d/%d"):format(#party, 6),
+      right = ("%s %d/%d"):format(Shell.ui("PARTY"), #party, 6),
     })
 
     if self.phase == "confirm" or self.phase == "confirmContest" then
@@ -797,16 +801,17 @@ return function(mod, ctx)
       caption = (cur.label == (game.save.player and game.save.player.name))
         and "Your trainer profile." or "Main menu."
     end
-    local right = ("BADGES %d  %s  DEX %d"):format(badges(game), clock(game),
-      owned(game))
+    local right = ("%s %d  %s  %s %d"):format(Shell.ui("BADGES"), badges(game),
+      clock(game), Shell.ui("DEX"), owned(game))
     -- Safari Zone: the remaining steps and BALL count ride the same readout
     local ow = game.overworld
     if game.save.safari and ow and ow.map and ow.inSafariStepZone then
       local ok, res = pcall(function() return ow:inSafariStepZone() end)
       if ok and res then
         local s = game.save.safari
-        right = ("%s   SAFARI %d/500  BALL\xc3\x97%d"):format(right,
-          math.floor(s.steps or 0), math.floor(s.balls or 0))
+        right = ("%s   %s %d/500  %s\xc3\x97%d"):format(right,
+          Shell.ui("SAFARI"), math.floor(s.steps or 0),
+          Shell.ui("BALL"), math.floor(s.balls or 0))
       end
     end
     Shell.top(Theme, game, {
@@ -815,15 +820,6 @@ return function(mod, ctx)
       caption = caption,
       money = Shell.money(game),
       embellish = embellish,
-    })
-
-    -- the START menu's own rows, in the shared left rail
-    Shell.rows(Theme, game, {
-      items = self.items,
-      index = self.index,
-      scroll = self.scroll,
-      maxVisible = self.maxVisible,
-      t = self.__t or 0,
     })
 
     -- roster -- never focused: the POKeMON row is gone from the rail, so this
@@ -840,13 +836,26 @@ return function(mod, ctx)
       portraits = Portraits,
     })
 
+    -- the START menu's own rows, in the shared left rail.  The list can grow
+    -- past the eight rows the band holds -- POKeDEX/MODS come and go with save
+    -- state and the ui.start_menu.items hook adds rows -- so it WRAPS into
+    -- columns (ui/shell.lua S.rows) instead of running under the footer's hint
+    -- row: the cursor's column is the one that grows, and the extra column is
+    -- painted over the roster like the action popup on the POKeMON page.
+    Shell.rows(Theme, game, {
+      items = self.items,
+      index = self.index,
+      columns = true, cap = 8,
+      t = self.__t or 0,
+    })
+
     Shell.footer(Theme, game, {
       hints = {
         { key = "\xe2\x86\x90\xe2\x86\x92", text = "POK\xc3\xa9MON" },
         { key = "A", text = "OK" },
         { key = "B", text = "CLOSE" },
       },
-      right = ("PARTY %d/%d"):format(#party, 6),
+      right = ("%s %d/%d"):format(Shell.ui("PARTY"), #party, 6),
     })
 
     Theme.set(C.white)

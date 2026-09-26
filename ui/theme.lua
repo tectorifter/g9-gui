@@ -185,6 +185,31 @@ return function(mod)
     return tryFont(path, size, METRIC[baseName(path)])
   end
 
+  -- The symbol supplement (assets/fonts/g9-symbols.ttf): U+2640 FEMALE SIGN,
+  -- U+2642 MALE SIGN and U+2605 BLACK STAR, the only characters a translated
+  -- modern name needs that Saira does not carry (Nidoran FEMALE/MALE, the item
+  -- star; see ui/translation.lua).  Built lazily per size -- a fallback Font is
+  -- a real Font at a real size -- and attached with LOVE 11.3's
+  -- Font:setFallbacks.  An engine without it, or a missing file, simply keeps
+  -- the old behaviour: the three glyphs do not render.
+  local FONT_SYMBOLS = "assets/fonts/g9-symbols.ttf"
+  local symbolFonts = {}
+  local function symbolAt(size)
+    local hit = symbolFonts[size]
+    if hit ~= nil then return hit or nil end
+    local f = fromMod(FONT_SYMBOLS, size)
+    symbolFonts[size] = f or false
+    return f
+  end
+  local function withSymbols(font, size)
+    if not (font and type(size) == "number" and font.setFallbacks) then
+      return font
+    end
+    local sym = symbolAt(size)
+    if sym then pcall(font.setFallbacks, font, sym) end
+    return font
+  end
+
   -- Fonts are built once, from the first game table that shows up: only that
   -- boot knows where the engine's own TTF lives.  A call with no game (the
   -- module-level helpers below default to `body`) builds an uncached set from
@@ -199,7 +224,7 @@ return function(mod)
     local def = game and game.data and game.data.font
     local engineFile = (def and def.ttf and def.ttf.file) or nil
     local function sized(rel, size)
-      return fromMod(rel, size) or fromFile(engineFile, size)
+      return withSymbols(fromMod(rel, size) or fromFile(engineFile, size), size)
     end
     local body = sized(FONT_REGULAR, BODY * k) or fallback
     local small = sized(FONT_REGULAR, SMALL * k) or body
@@ -297,8 +322,27 @@ return function(mod)
   end
   Theme.scrub = scrub
 
+  -- The modern UI's own lexicon hook (ui/translation.lua's M.ui).  The entry
+  -- chunk installs it once the translation layer is up; until then, and
+  -- whenever no translation mod is active, it is a no-op.  It is applied at all
+  -- four text entry points -- draw plus the three measurers -- so a string is
+  -- MEASURED as the text actually drawn (a localized string has a different
+  -- width).  Only strings the lexicon knows are touched, so names, dialogue
+  -- and numbers pass through untouched.
+  local localizer = nil
+  function Theme.setLocalizer(fn)
+    if type(fn) == "function" then localizer = fn end
+  end
+  local function localize(str)
+    if not localizer then return str end
+    local ok, v = pcall(localizer, str)
+    if ok and type(v) == "string" and v ~= "" then return v end
+    return str
+  end
+  Theme.localize = localize
+
   function Theme.w(str, font)
-    return (font or Theme.fonts(nil).body):getWidth(scrub(str))
+    return (font or Theme.fonts(nil).body):getWidth(scrub(localize(str)))
   end
 
   -- Cap-height ink of a font, in pixels (the size of a flat-top capital).
@@ -313,7 +357,7 @@ return function(mod)
   -- no room even for the ellipsis the longest bare prefix is used.
   function Theme.fit(str, font, maxPx)
     if str == nil then return str end
-    str = scrub(tostring(str))
+    str = scrub(localize(scrub(tostring(str))))
     font = font or Theme.fonts(nil).body
     if str == "" or maxPx <= 0 then return str end
     if font:getWidth(str) <= maxPx then return str end
@@ -352,19 +396,49 @@ return function(mod)
     return str:sub(1, longest(maxPx))
   end
 
+  -- Break one over-long, space-less token (a CJK run -- Japanese/Korean have
+  -- no word breaks -- or a long URL) into pieces that fit maxPx, sliced on
+  -- UTF-8 boundaries.  Without this a translated dialogue line arrived as one
+  -- "word" and Theme.fit squeezed it onto a single line (with a trailing
+  -- ellipsis) instead of wrapping onto the lines the card has room for.
+  local function breakToken(token, font, maxPx)
+    local out, cur = {}, ""
+    local i, n = 1, #token
+    while i <= n do
+      local b = token:byte(i) or 0
+      local len = 1
+      if b >= 0xF0 then len = 4 elseif b >= 0xE0 then len = 3
+      elseif b >= 0xC0 then len = 2 end
+      local ch = token:sub(i, i + len - 1)
+      local trial = cur .. ch
+      if cur ~= "" and font:getWidth(trial) > maxPx then
+        out[#out + 1] = cur
+        cur = ch
+      else
+        cur = trial
+      end
+      i = i + len
+    end
+    if cur ~= "" then out[#out + 1] = cur end
+    return out
+  end
+
   -- Word-wrap `str` to a pixel budget: words are laid out until the next one
   -- would pass maxPx, then a new line starts.  A single word wider than the
-  -- whole budget is truncated by fit rather than overflowing.  The popup cards
-  -- have a fixed width, so their body text wraps onto further lines instead of
-  -- being cut to a stub with a trailing ellipsis.
+  -- whole budget is BROKEN across lines (on UTF-8 boundaries) rather than
+  -- truncated, so a translated dialogue line actually fits the card.  The
+  -- popup cards have a fixed width, so their body text wraps onto further
+  -- lines instead of being cut to a stub with a trailing ellipsis.
   function Theme.wrap(str, font, maxPx)
     if str == nil then return {} end
     font = font or Theme.fonts(nil).body
     local out, cur = {}, ""
-    for word in scrub(tostring(str)):gmatch("%S+") do
+    for word in scrub(localize(scrub(tostring(str)))):gmatch("%S+") do
       if font:getWidth(word) > maxPx then
         if cur ~= "" then out[#out + 1] = cur; cur = "" end
-        out[#out + 1] = Theme.fit(word, font, maxPx)
+        local pieces = breakToken(word, font, maxPx)
+        for k = 1, #pieces - 1 do out[#out + 1] = pieces[k] end
+        cur = pieces[#pieces] or ""
       else
         local trial = (cur == "") and word or (cur .. " " .. word)
         if cur ~= "" and font:getWidth(trial) > maxPx then
@@ -441,7 +515,7 @@ return function(mod)
   -- align: nil/"left" | "right" | "center" -- x is then the right edge or the
   -- centre.  Returns the drawn width.
   function Theme.text(str, x, y, font, align, color)
-    str = scrub(tostring(str))
+    str = scrub(localize(tostring(str)))
     font = font or Theme.fonts(nil).body
     if color then Theme.set(color) end
     love.graphics.setFont(font)

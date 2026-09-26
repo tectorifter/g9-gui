@@ -207,11 +207,6 @@ return function(mod, ctx)
       embellish = embellish,
     })
 
-    if self.__rows then
-      Shell.rows(Theme, game, { items = self.__rows, w = 158, labelPad = 32,
-        t = self.__t or 0 })
-    end
-
     Roster.draw(Theme, game, {
       x = Shell.ROSTER_X, y = Shell.ROSTER_Y, w = Shell.ROSTER_W,
       rowH = Shell.ROW_H, headerH = Shell.HEADER_H,
@@ -219,6 +214,15 @@ return function(mod, ctx)
       t = self.__t or 0, gen = 2, mode = opt("ui_portraits"),
       embellish = embellish, portraits = Portraits,
     })
+
+    -- the same START rail as the START / POKeMON pages (when this page has
+    -- one), drawn as the section's own column only -- see ui/shell.lua S.rows
+    -- and the note in ui/party_menu.lua: this page is a modal, so the rail is
+    -- context behind the wash and a second column would only be a distraction
+    if self.__rows then
+      Shell.rows(Theme, game, { items = self.__rows, w = 158, labelPad = 32,
+        t = self.__t or 0, columns = true, cap = 8, cols = 1 })
+    end
 
     -- the modal wash: the page stays visible under the popup, like the field
     -- submenu, so the flow reads as one screen

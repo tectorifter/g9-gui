@@ -39,6 +39,35 @@ return function(mod, ctx)
 
   local M = {}
 
+  -- Gold's HM set is Gen 1's five (CUT / FLY / SURF / STRENGTH / FLASH) plus
+  -- WHIRLPOOL and WATERFALL, and BOTH of the engine's Gold forget paths guard
+  -- all seven (Game2:learnMoveOn's own HM_MOVES and src/ui/gen2/MoveDeleter).
+  -- The engine module this page repaints carries only Gen 1's five, so on Gold
+  -- the page itself refuses the two it would otherwise let through, pushing
+  -- the same "HM techniques can't be deleted!" box the engine pushes (drawn as
+  -- this page's card, because the page is ours).  Only the Gold-only pair
+  -- needs catching here -- the module already refuses the other five -- and
+  -- only when the player presses A on that slot, so nothing can slip past the
+  -- guard while the engine's own update still runs.
+  local GOLD_HM_ONLY = { WATERFALL = true, WHIRLPOOL = true }
+
+  -- True when the A press on the highlighted slot must be refused on Gold;
+  -- pushes the refusal box before answering.  The caller skips the engine's
+  -- own update for that frame, so the slot is never written.
+  local function goldHmBlocked(self)
+    local mv = self.mon and self.mon.moves and self.mon.moves[self.index]
+    if not (mv and GOLD_HM_ONLY[mv.id]) then return false end
+    local input = self.game and self.game.input
+    if not (input and type(input.wasPressed) == "function") then return false end
+    if not input:wasPressed("a") then return false end
+    local TextBox = require("src.render.TextBox")
+    local romText = require("src.core.RomText")
+    self.game.stack:push(TextBox.new(self.game,
+      romText(self.game.data, "_HMCantDeleteText",
+        "HM techniques\ncan't be deleted!")))
+    return true
+  end
+
   -- ---------------------------------------------------------------- the mon
   -- The name the engine itself would print: a nickname wins, else the species
   -- record's name (which g9-gui's display_names normalisation has already
@@ -243,6 +272,9 @@ return function(mod, ctx)
     local baseUpdate = self.update
     self.update = function(s, dt)
       s.__t = (s.__t or 0) + 1
+      -- Gold's two extra HMs are refused here (see GOLD_HM_ONLY); the engine's
+      -- own update is skipped for that frame, so it cannot also write the slot.
+      if gen == 2 and s.selecting and goldHmBlocked(s) then return end
       if baseUpdate then return baseUpdate(s, dt) end
     end
     if gen == 2 then

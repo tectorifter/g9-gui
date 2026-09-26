@@ -215,7 +215,15 @@ return function(mod, ctx)
     -- work without it.
     pcall(function() mod.content.constants:patch("bagSize", U.SLOTS) end)
     pcall(function() mod.content.constants:patch("itemStackCap", U.STACK) end)
-    pcall(function() mod.content.field:patch("pcItemCap", U.PC_ITEMS) end)
+    -- field.pcItemCap is a Gen 1 registry: Schemas.lua's R.GEN2.field is
+    -- false, so on Gold this patch is dropped and reported ("the field
+    -- registry has no Gen 2 target") rather than rerouted.  Gold's own PC
+    -- item storage is a different store, and this module's other two
+    -- registry patches plus every shim below already cover both
+    -- generations -- so the patch is simply not attempted there.
+    if gen ~= 2 then
+      pcall(function() mod.content.field:patch("pcItemCap", U.PC_ITEMS) end)
+    end
 
     -- 2. per-pocket capacity.  Gen 2's Bag answers a per-pocket cap from a
     -- hard-coded table unless a mod replaces it, so raise every pocket (Gen 1

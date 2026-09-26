@@ -142,11 +142,52 @@ return function(mod, ctx)
   end
   local translate = M.strings
 
-  -- only a-z are folded: a name's accented and symbol glyphs are ones the deck
-  -- page prints as themselves, and Saira has them.
+  -- only a-z are folded by string.upper; the accented Latin-1 lowercase letters
+  -- a translated name brings ("Absorcion" with an o-acute, "Nidoran" never) are
+  -- folded separately, byte pair by byte pair, so an uppercase row reads
+  -- "ABSORCION" with a real accented capital and not "ABSORCIoN" with the
+  -- lowercase one.  Saira carries every one of these glyphs.  A pair not in the
+  -- table (any other UTF-8 sequence) is left exactly as it was.
+  local ACCENT_UPPER = {
+    ["\195\161"] = "\195\129", -- a-acute
+    ["\195\169"] = "\195\137", -- e-acute
+    ["\195\173"] = "\195\141", -- i-acute
+    ["\195\179"] = "\195\147", -- o-acute
+    ["\195\186"] = "\195\154", -- u-acute
+    ["\195\188"] = "\195\156", -- u-diaeresis
+    ["\195\177"] = "\195\145", -- n-tilde
+    ["\195\160"] = "\195\128", -- a-grave
+    ["\195\168"] = "\195\136", -- e-grave
+    ["\195\172"] = "\195\140", -- i-grave
+    ["\195\178"] = "\195\146", -- o-grave
+    ["\195\167"] = "\195\135", -- c-cedilla
+    ["\195\162"] = "\195\130", -- a-circumflex
+    ["\195\170"] = "\195\138", -- e-circumflex
+    ["\195\174"] = "\195\142", -- i-circumflex
+    ["\195\180"] = "\195\148", -- o-circumflex
+    ["\195\187"] = "\195\155", -- u-circumflex
+    ["\195\164"] = "\195\132", -- a-diaeresis
+    ["\195\171"] = "\195\139", -- e-diaeresis
+    ["\195\175"] = "\195\143", -- i-diaeresis
+    ["\195\182"] = "\195\150", -- o-diaeresis
+  }
   function M.caps(text)
     if type(text) ~= "string" then return "" end
-    return (text:gsub("[a-z]", string.upper))
+    text = (text:gsub("[a-z]", string.upper))
+    return (text:gsub("\195[\128-\191]", ACCENT_UPPER))
+  end
+
+  -- The modern-content translation layer (ui/translation.lua; nil when the
+  -- feature is off or no catalog).  Species / move / item names already arrive
+  -- translated on the RECORD; ability names have no registry and so are folded
+  -- here, right before the caps pass.
+  local Translation = ctx and ctx.Translation or nil
+  local function abilityName(name)
+    if Translation and type(Translation.ability) == "function" then
+      local ok, t = pcall(Translation.ability, name)
+      if ok and type(t) == "string" then return t end
+    end
+    return name
   end
 
   function M.prettyForm(form)
@@ -219,7 +260,7 @@ return function(mod, ctx)
       if type(entry) == "table" and type(entry.name) == "string"
         and entry.name ~= "" then
         kept[#kept + 1] = {
-          name = M.caps(entry.name), hidden = entry.hidden and true or false,
+          name = M.caps(abilityName(entry.name)), hidden = entry.hidden and true or false,
           slot = type(entry.slot) == "number" and entry.slot or math.huge,
           index = index,
         }

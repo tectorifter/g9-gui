@@ -36,6 +36,52 @@
 return function(mod)
   local S = {}
 
+  -- The modern UI's own lexicon (ui/translation.lua's M.ui).  Individual labels
+  -- are localized by the Theme as they are drawn, but a COMPOSED readout -- the
+  -- "MONEY: 2244" wallet, the "BADGES n HH:MM DEX n" line, "PARTY 3/6" -- is
+  -- one string the lexicon cannot match, so its WORDS are looked up here and
+  -- the number is spliced in.  No-op when the translation layer is absent or
+  -- inactive.  Resolved lazily and once, since the layer is published in the
+  -- entry chunk before any screen draws.
+  local uiFn
+  local function T(text)
+    if not uiFn then
+      local t = mod.exports and mod.exports.translation
+      if t and type(t.ui) == "function" then uiFn = t.ui end
+    end
+    if not uiFn then return text end
+    local ok, v = pcall(uiFn, text)
+    if ok and type(v) == "string" and v ~= "" then return v end
+    return text
+  end
+  S.ui = T
+
+  -- A boolean option row, read the same way main.lua reads it: the choice's
+  -- stored value ("true"/"false"), a boolean, a number or the choice's own
+  -- LABEL ("ON"/"OFF") all mean the same thing.  The Android report that
+  -- flipped g9-Battle-Scene's learner row showed the platform can hand a row
+  -- back in any of those shapes, and this module reads mod.options directly
+  -- (it is built from the mod alone), so it needs the same reader rather than
+  -- an exact `tostring(v) == "false"`.  Answers nil for a row that is absent or
+  -- of no shape we know, so each caller keeps its own fail-open default.
+  local function optionOn(key)
+    local o = mod and mod.options
+    if not (o and type(o.get) == "function") then return nil end
+    local ok, v = pcall(o.get, o, key)
+    if not ok then return nil end
+    if v == true then return true end
+    if v == false then return false end
+    if type(v) == "number" then return v ~= 0 end
+    if type(v) == "string" then
+      local s = v:lower()
+      if s == "on" or s == "true" or s == "yes" or s == "1" then return true end
+      if s == "off" or s == "false" or s == "no" or s == "0" or s == "" then
+        return false
+      end
+    end
+    return nil
+  end
+
   -- ---------------------------------------------------------------- geometry
   S.W, S.H = 540, 360
 
@@ -221,7 +267,7 @@ return function(mod)
     local save = game and game.save
     local m = (save and save.player and save.player.money)
       or (save and save.money) or 0
-    return ("MONEY: %d"):format(m)
+    return ("%s: %d"):format(T("MONEY"), m)
   end
 
   -- ------------------------------------------------------------------- header
@@ -323,17 +369,104 @@ return function(mod)
   -- START screen's 152px so a longer label like NEW GAME is never cut.  The
   -- defaults are the spread's own numbers, so the START and POKeMON pages are
   -- unchanged.
+  --
+  -- COLUMNS (`opts.columns`).  A menu can grow past what the content band
+  -- holds -- the START menu gains rows as the save unlocks them and as mods
+  -- hook `ui.start_menu.items` in, and every one of those rows is a real
+  -- destination.  Lowered into the band they ran over the footer's hint row
+  -- (the START and POKeMON pages share this rail, so both showed it).  Instead
+  -- of scrolling the window (which the engine's Menu does, and which the
+  -- POKeMON page's rail cannot do at all: it is a static mirror with no
+  -- cursor), the list WRAPS into columns: at most `cap` rows per column (8,
+  -- the number that ends exactly on the footer rule), each new column a panel
+  -- of its own, its rows starting at the TOP of the band.  The columns on
+  -- screen are the ones the cursor has reached -- press DOWN off the eighth
+  -- row and the rest of the list appears in the column beside it -- so the
+  -- list "grows" a column at a time and never draws under the footer.
+  --
+  -- With no `index` every column is drawn (nothing has a cursor to narrow the
+  -- window).  A caller may instead pass `cols` to fix the count -- the POKeMON
+  -- page's static mirror uses `cols = 1`: it sits 8px from the roster, so a
+  -- second column there would cover the first member's portrait and read as a
+  -- rendering bug rather than a menu (the wrapped rows live on the START
+  -- screen, whose rail is the one the cursor drives).
+  --
+  -- opts may also carry `labelPad` (the label inset, default 34), `w` (the
+  -- column width, default 152) and `row` (the row pitch, default 30).
   function S.rows(Theme, game, opts)
     local C = Theme.col
     local F = Theme.fonts(game).body
     local items = opts.items or {}
     if #items == 0 then return end
-    local visible = opts.maxVisible and math.min(opts.maxVisible, #items) or #items
-    local scroll = opts.scroll or 0
     local x = opts.x or S.LIST_X
     local ry0 = opts.y or S.LIST_Y
     local w = opts.w or S.LIST_W
     local row = opts.row or S.LIST_ROW
+
+    if opts.columns then
+      local cap = math.max(1, opts.cap or opts.maxVisible or 8)
+      local total = #items
+      local totalCols = math.max(1, math.ceil(total / cap))
+      -- the columns to draw: an explicit count (`cols`, for a page whose rail
+      -- has no cursor of its own and wants one column), else the columns the
+      -- cursor has reached, else -- with neither -- every column there is
+      local cols
+      if opts.cols then cols = opts.cols
+      elseif opts.index then cols = math.ceil(opts.index / cap)
+      else cols = totalCols end
+      if cols < 1 then cols = 1 end
+      if cols > totalCols then cols = totalCols end
+      local gap = opts.colGap or 8
+      local pad = opts.labelPad or 34
+      -- Several columns lie over the roster (this rail is shared by the START
+      -- and POKeMON pages and the START screen keeps its party preview behind
+      -- it).  The panel is translucent by design, so dim what is behind the
+      -- cluster first -- otherwise a party row's sprite and name read through
+      -- the option labels.  The action popup does the same for its own columns
+      -- (ui/party_menu.lua).
+      if cols > 1 then
+        local tallest = math.min(cap, total) * row + 4
+        Theme.set(C.black, 0.55)
+        Theme.rect("fill", x - 3, ry0 - 3,
+          cols * w + (cols - 1) * gap + 6, tallest + 6, 8)
+      end
+      for k = 1, cols do
+        local cx = x + (k - 1) * (w + gap)
+        local first = (k - 1) * cap + 1
+        local count = math.min(cap, total - first + 1)
+        local lx = cx + pad
+        local ch = count * row + 4
+        Theme.panel(cx, ry0, w, ch, { radius = 6, shadow = 2 })
+        local y = ry0 + 2
+        for i = 1, count do
+          local item = items[first + i - 1]
+          local at = first + i - 1
+          local label = type(item) == "string" and item or (item.label or "")
+          label = S.display(label)
+          local selected = at == opts.index
+          local band = selected or at == opts.active
+          if band then
+            Theme.set(C.rowLit, selected and 0.55 or 0.34)
+            Theme.rect("fill", cx + 4, y - 2, w - 8, row - 2, 5)
+          end
+          local label2 = Theme.fit(label, F, (cx + w) - lx - 6)
+          if selected then
+            Theme.chevrons(cx + 8, y + 5, 18, C.accent,
+              0.5 + 0.5 * math.sin((opts.t or 0) * 0.18))
+            -- double-print the selected row for weight
+            Theme.text(label2, lx, y + 6, F, "left", C.accent)
+            Theme.text(label2, lx + 1, y + 6, F, "left", C.accent)
+          else
+            Theme.text(label2, lx, y + 6, F, "left", band and C.ink or C.inkDim)
+          end
+          y = y + row
+        end
+      end
+      return
+    end
+
+    local visible = opts.maxVisible and math.min(opts.maxVisible, #items) or #items
+    local scroll = opts.scroll or 0
     local lx = x + (opts.labelPad or 34)
     local h = visible * row + 4
     Theme.panel(x, ry0, w, h, { radius = 6, shadow = 2 })
@@ -481,10 +614,9 @@ return function(mod)
   -- translating it `S.pageOffset(game)` to the right (Game:draw's
   -- classicOffset), so such a caller must undo that first -- see S.pageOffset.
   local function embellishOn()
-    local o = mod and mod.options
-    if not (o and type(o.get) == "function") then return true end
-    local ok, v = pcall(o.get, o, "ui_embellishment")
-    return not (ok and tostring(v) == "false")
+    local v = optionOn("ui_embellishment")
+    if v == nil then return true end
+    return v
   end
 
   -- How far the engine has shifted a pushed classic overlay to the right
@@ -631,11 +763,7 @@ return function(mod)
     if type(game) == "table" and game.__g9guiPcRowAfter ~= nil then
       return game.__g9guiPcRowAfter
     end
-    local onOpt = false
-    if mod and mod.options and type(mod.options.get) == "function" then
-      local ok, v = pcall(mod.options.get, mod.options, "ui_pc_row")
-      onOpt = ok and tostring(v) == "true"
-    end
+    local onOpt = optionOn("ui_pc_row") == true
     if not onOpt then return nil end
     local ok, Strings = pcall(require, "src.core.Strings")
     if not (ok and type(Strings) == "function") then return nil end

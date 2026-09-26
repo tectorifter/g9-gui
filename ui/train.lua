@@ -25,6 +25,15 @@
 -- panel already uses that shape), the table keeps its STAT/IV/EV/CUR columns,
 -- and the ability column becomes the page's right-hand info panel.
 --
+-- ONE ACCENT BUTTON PER PAGE.  Exactly one pill on the page is drawn in the
+-- accent ink (see `pill`): the one under the cursor.  Every other pill --
+-- the other tabs, the current tab once the cursor leaves the strip, the nudge
+-- row, APPLY, the moves categories -- is plain, mirroring the engine's own
+-- native TRAIN (stats/train_screen.lua), whose tab strip double-frames ONLY
+-- the cursor.  The first cut of this skin instead dressed the cursor AND the
+-- current page/value in the same accent, so putting the cursor on the nudge
+-- row left the tab, the nudge column and APPLY all lit together.
+--
 -- Field/方法 contract read from the engine's Screen (stats/train_screen.lua):
 --   mode "stats"|"moves"; page 1..7 (IV,EV,NAT,GENDER,MOVES,ABILITY,HIDDEN);
 --   focus "tabs"|"rows"|"apply"; row (stat), col (nudge button); ivs/evs keyed
@@ -56,6 +65,18 @@ return function(mod, ctx)
   local W, H = Shell.W, Shell.H
   local MARGIN = Shell.MARGIN
   local C = Theme.col
+
+  -- The modern-content translation layer (ui/translation.lua; nil when off or
+  -- no catalog).  Ability names have no content registry, so this is where the
+  -- TRAIN page's ABILITY panel gets its translated text.
+  local Translation = ctx.Translation
+  local function abilityName(v)
+    if Translation and type(Translation.ability) == "function" then
+      local ok, t = pcall(Translation.ability, v)
+      if ok and type(t) == "string" then return t end
+    end
+    return v
+  end
 
   -- STAT_ORDER comes from the engine mod's own ModernStats export so the rows
   -- are the exact keys the engine's ivs/evs tables use.  The literal fallback
@@ -140,15 +161,33 @@ return function(mod, ctx)
     return y + math.floor((h - Theme.capOf(font)) * 0.5 + 0.5)
   end
 
-  -- One framed option: the same glass pill the rest of the suite uses.  `state`
-  -- is "focus" (the cursor), "on" (the current page, not the cursor), "dim"
-  -- (a disabled entry) or nil.
+  -- One framed option: the same glass pill the rest of the suite uses.  The
+  -- states are TWO TIERS, and the tiers exist so that exactly ONE button on the
+  -- page can ever read as "selected" -- the first cut of this skin dressed BOTH
+  -- the cursor and the current page/value in the same accent ink, so moving the
+  -- cursor onto the nudge row left the current tab, the current nudge column
+  -- AND APPLY all lit at once (three "selected" buttons on screen together).
+  -- The engine's own native TRAIN (stats/train_screen.lua) is the reference and
+  -- it has no such ambiguity: EVERY tab and option is framed once, and the one
+  -- under the cursor is the only one framed twice -- "the weight of the frame is
+  -- the only selection cue".  The modern translation of "framed once" is the
+  -- plain pill, so:
+  --   "focus" -- the cursor, and the ONLY pill drawn in the accent ink, with
+  --              the lit fill, the lit border and a shadow.  `drawTabs`,
+  --              `drawNudge` and `drawApply` each pass it for at most one pill
+  --              and never two groups at once, so the page always shows exactly
+  --              one accent-coloured button: the one under the cursor.
+  --   "dim"   -- a disabled entry; nil -- every other button (the unselected
+  --              tabs, the nudge row when the cursor is elsewhere, APPLY, the
+  --              moves categories).  The current page is not colour-marked --
+  --              exactly as the native strip does not mark it -- because the
+  --              page's own body already says which one is open: the IV/EV
+  --              nudge sets differ, NAT and the gender page print their value,
+  --              and the moves page prints CATEGORY in its detail panel.
   local function pill(x, y, w, h, label, font, state)
     local fill, border, ink
     if state == "focus" then
       fill, border, ink = C.panelLit, C.borderLit, C.accent
-    elseif state == "on" then
-      fill, border, ink = C.rowLit, C.borderLit, C.accent
     elseif state == "dim" then
       fill, border, ink = C.panelDeep, C.border, C.inkFaint
     else
@@ -205,12 +244,11 @@ return function(mod, ctx)
     for i, tab in ipairs(TABS) do labels[i] = tab.label end
     local xs, ws = layoutRow(labels, F, MARGIN, W - MARGIN, 6, 14)
     for i, tab in ipairs(TABS) do
-      local state
-      if self.focus == "tabs" then
-        state = (self.page == tab.page) and "focus" or nil
-      else
-        state = (self.page == tab.page) and "on" or nil
-      end
+      -- Only the tab the cursor is standing on is lit (the engine's strip
+      -- double-frames only the cursor too); with the cursor below, the strip
+      -- is entirely plain, so the page's one accent button stays the cursor's.
+      local state = (self.focus == "tabs" and self.page == tab.page)
+        and "focus" or nil
       pill(xs[i], TAB_Y, ws[i], TAB_H, tab.label, F, state)
     end
   end
@@ -226,9 +264,8 @@ return function(mod, ctx)
       for i, label in ipairs(set.buttons) do
         local state
         if self.focus == "rows" then
+          -- the cursor is on the nudge row: it is the page's one accent pill
           state = (self.col == i) and "focus" or nil
-        else
-          state = (self.col == i) and "on" or nil
         end
         pill(xs[i], NUDGE_Y, ws[i], NUDGE_H, label, F, state)
       end
@@ -236,12 +273,12 @@ return function(mod, ctx)
       local label = tostring(self.nature or "----")
       local w = Theme.w(label, F) + 44
       pill(MARGIN, NUDGE_Y, w, NUDGE_H, label, F,
-        (self.focus == "rows") and "focus" or "on")
+        (self.focus == "rows") and "focus" or nil)
     elseif page == TAB_GENDER then
       local label = (self.gender == "female") and "FEMALE" or "MALE"
       local w = Theme.w(label, F) + 44
       pill(MARGIN, NUDGE_Y, w, NUDGE_H, label, F,
-        (self.focus == "rows") and "focus" or "on")
+        (self.focus == "rows") and "focus" or nil)
     else
       -- MOVES / ABILITY / HIDDEN are one-shot actions, not editors: A runs
       -- them, so the strip explains what the press would do.
@@ -303,7 +340,7 @@ return function(mod, ctx)
       { radius = 6, shadow = 2 })
     Theme.text("ABILITY", PANEL_X + 14, TABLE_HDR_Y, F.small, "left",
       C.inkFaint)
-    Theme.text(Theme.fit(tostring(mon.ability or "----"), F.body, PANEL_W - 28),
+    Theme.text(Theme.fit(tostring(abilityName(mon.ability) or "----"), F.body, PANEL_W - 28),
       PANEL_X + 14, 160, F.body, "left", C.accent)
 
     local slot = safe(self.abilitySlot, self)
@@ -314,7 +351,7 @@ return function(mod, ctx)
       C.inkDim)
 
     Theme.text("PREV", PANEL_X + 14, 210, F.small, "left", C.inkFaint)
-    Theme.text(Theme.fit(tostring(mon.g9PrevAbility or "----"), F.small, 116),
+    Theme.text(Theme.fit(tostring(abilityName(mon.g9PrevAbility) or "----"), F.small, 116),
       PANEL_X + PANEL_W - 14, 210, F.small, "right", C.inkDim)
 
     Theme.rule(PANEL_X + 14, 230, PANEL_W - 28, C.border)
@@ -344,7 +381,7 @@ return function(mod, ctx)
       centerY(APPLY_Y, APPLY_H, F), F, "right",
       cost > 0 and C.gold or C.inkFaint)
     pill(bx, APPLY_Y, w, APPLY_H, label, F,
-      (self.focus == "apply") and "focus" or "on")
+      (self.focus == "apply") and "focus" or nil)
   end
 
   -- ------------------------------------------------------------- stats page
@@ -369,8 +406,11 @@ return function(mod, ctx)
     local labels = MOVE_CATEGORIES
     local xs, ws = layoutRow(labels, F.body, MARGIN, W - MARGIN, 8, 16)
     for i, label in ipairs(labels) do
-      pill(xs[i], TAB_Y, ws[i], TAB_H, label, F.body,
-        (self.category == i) and "on" or nil)
+      -- The move categories are a selector, not a cursor: LEFT/RIGHT changes
+      -- them while the move list below holds the page's one accent cursor row,
+      -- so every category pill stays plain (the detail panel prints the open
+      -- category).  Matches the engine's own "CAT:<label>" readout.
+      pill(xs[i], TAB_Y, ws[i], TAB_H, label, F.body, nil)
     end
 
     local list = self.moveList or {}

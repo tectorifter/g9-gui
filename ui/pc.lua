@@ -60,6 +60,12 @@ return function(mod, ctx)
   local MARGIN = Shell.MARGIN
   local Gen2 = ctx.gen == 2
 
+  -- ui/pc.lua's own fallback front-pic painter for the box page's mon card (the
+  -- Gen 2 arm's picFor reader).  Forward-declared because the grid page -- which
+  -- every generation's box arm draws -- is defined before the Gold section that
+  -- assigns it.
+  local g2pic
+
   -- Rows the list pages reveal at once.  The engine's own cursor window is
   -- narrower (ListMenu's item lists keep the cursor in the top three), so the
   -- cursor is always inside whatever is drawn here.  Eight rows at row 30 is
@@ -115,6 +121,51 @@ return function(mod, ctx)
     pc_box_change = true,
   }
 
+  -- The three of those that are BILL's PC's own mon lists -- the storage box's
+  -- withdraw / deposit / release pages.  They are drawn as the modern box GRID
+  -- (M.drawBoxList) rather than as the classic nickname rows; the item lists
+  -- above them keep the row page.
+  local BOX_LIST_KINDS = {
+    pc_box_withdraw = true, pc_box_deposit = true, pc_box_release = true,
+  }
+
+  -- The engine builds these lists out of plain view rows (src/ui/BoxMenu.lua's
+  -- monRow: label, :L<level>, the slot index in `value`), so a row carries no
+  -- MON.  The modern slot page reads the save's arrays directly and needs none,
+  -- but the engine's own mon-submenu card (isMonSubmenu) and any mod reading a
+  -- pushed list still expect the pair, so each row's mon is resolved ONCE, at
+  -- the push, and hung on the row.
+  local function enrichBoxItems(state)
+    local game = state and state.game
+    local save = game and game.save
+    if not save then return end
+    local items = state.items
+    if type(items) ~= "table" then return end
+    local deposit = (state.kind == "pc_box_deposit")
+    local box
+    if not deposit then
+      local okB, B = pcall(require, "src.pokemon.Boxes")
+      if okB and type(B) == "table" and type(B.active) == "function" then
+        local okA, v = pcall(B.active, save)
+        if okA and type(v) == "table" then box = v end
+      end
+    end
+    for _, it in ipairs(items) do
+      if type(it) == "table" and not it.cancel and it.mon == nil then
+        local slot = tonumber(it.value)
+        local mon
+        if slot then
+          if deposit then
+            mon = save.party and save.party[slot]
+          elseif box then
+            mon = box[slot]
+          end
+        end
+        if mon then it.mon = mon end
+      end
+    end
+  end
+
   -- BoxMenu's monSubmenu: the ACTION / STATS / CANCEL box the engine pushes
   -- OVER a box list when a stored mon is chosen (bills_pc.asm
   -- DisplayDepositWithdrawMenu).  It is a plain Menu -- no screen id and no
@@ -155,7 +206,10 @@ return function(mod, ctx)
   -- The engine's own update keeps running (wrapped only to tick a frame
   -- counter for the pulsing chevrons), so the cursor, the keepOpen flow and
   -- every write are untouched.
-  local function decorate(state, drawFn)
+  -- `updateFn` replaces the engine's own update where the page owns its cursor
+  -- and its writes (the box SLOT page, both generations); without it the engine
+  -- update keeps running beneath the frame ticker.
+  local function decorate(state, drawFn, updateFn)
     if state.__g9pcDressed then return state end
     state.__g9pcDressed = true
     state.__g9gui = true
@@ -169,6 +223,7 @@ return function(mod, ctx)
     local baseUpdate = state.update
     state.update = function(self, dt)
       self.__t = (self.__t or 0) + 1
+      if updateFn then return updateFn(self) end
       if baseUpdate then baseUpdate(self, dt) end
     end
     state.draw = function(self) drawFn(self) end
@@ -181,12 +236,19 @@ return function(mod, ctx)
       local kind = G2_SCREENS[state.screenId]
       local drawFn = kind and G2_DRAW[kind]
       if not drawFn then return end
+      -- the storage menu's DEPOSIT POKéMON row is gone: depositing is done on
+      -- the slot page by moving a party mon into a box (see M.g2TameStorage)
+      if kind == "storage" then M.g2TameStorage(state) end
       state.__g9pcDressed = true
       state.__g9gui = true
       state.__t = 0
       local baseUpdate = state.update
       state.update = function(self, dt)
+        -- BILL's BOX: the slot page owns its own cursor and its own writes
+        -- (see M.g2BoxUpdate), so the engine's packed-list model is not driven
+        -- at all here -- the whole update is replaced, not wrapped.
         self.__t = (self.__t or 0) + 1
+        if kind == "box" then return M.g2BoxUpdate(self) end
         if baseUpdate then return baseUpdate(self, dt) end
       end
       -- S.gen2Surface installs :drawsWidescreen (so Game2 hands this state the
@@ -199,9 +261,21 @@ return function(mod, ctx)
     end
     if isMenu(state) then
       if isMonSubmenu(state) then state.__g9pcMon = true end
+      -- BILL's PC's own menu: retune its MOVE/DEPOSIT rows (see
+      -- M.g1TameBoxMenu) before the page takes over
+      if state.screenId == "BoxMenu" then M.g1TameBoxMenu(state) end
       decorate(state, M.drawMenu)
     elseif isList(state) then
-      decorate(state, M.drawList)
+      if BOX_LIST_KINDS[state.kind] then
+        -- a Bill's PC mon list is the modern SLOT page on Gen 1 too: it owns
+        -- its own cursor and its own writes (see M.g1BoxUpdate), so the
+        -- engine's packed ListMenu model is never driven.  Each row's own MON
+        -- is resolved once here for the legacy engine mon-submenu card.
+        enrichBoxItems(state)
+        decorate(state, M.drawList, M.g1BoxUpdate)
+      else
+        decorate(state, M.drawList)
+      end
     elseif state.screenId == "LeaguePC" then
       -- the HALL OF FAME viewer: a bespoke classic screen, not a Menu/list
       decorate(state, M.drawLeague)
@@ -212,6 +286,12 @@ return function(mod, ctx)
 
   -- ---------------------------------------------------------------- display
   local function display(s) return Shell.display(s) end
+
+  -- A single word of the suite's own chrome, localized through the translation
+  -- layer (ui/shell.lua's S.ui).  The COMPOSED readouts -- "BOX 1/50",
+  -- "PARTY 6/6", the ACTIVE-BOX line -- are one string the lexicon cannot match
+  -- as a whole, so their WORDS are looked up here and the figures spliced in.
+  local function word(s) return Shell.ui(s) end
 
   -- A mon's own name as the player reads it: its nickname when it has one,
   -- else its SPECIES' display name (the record this suite renamed on load --
@@ -225,11 +305,25 @@ return function(mod, ctx)
     return mon.nickname or mon.name or (def and def.name) or mon.species or "?"
   end
 
+  -- The Bill's PC row that opens the box page is called MOVE now -- the page IS
+  -- a move/slot page -- so its engine label ("WITHDRAW POKéMON") is renamed on
+  -- the way to the screen.  The item PC's "WITHDRAW ITEM" is a different screen
+  -- and is left alone (the pattern only matches "WITHDRAW POK").
+  local function pcMoveLabel(label)
+    if type(label) ~= "string" then return label end
+    local out = (label:gsub("^WITHDRAW POK", "MOVE POK"))
+    if out == "WITHDRAW" then out = "MOVE" end
+    return out
+  end
+
   -- one-line caption for a menu row, matched on the engine's English source
   -- labels; an unrecognised (i.e. localized) label simply has no caption
   local function describe(label)
     local s = display(label or ""):upper()
     if s:find("LOG OFF") or s:find("SEE YA") then return "Turn the PC off." end
+    if s:find("W/O MAIL") then return "Move a POKéMON without MAIL." end
+    if s == "MOVE" then return "Move a POKéMON between BOXes." end
+    if s:find("MOVE POK") then return "Move a POKéMON between BOXes." end
     if s:find("WITHDRAW") then
       if s:find("ITEM") then return "Take an item out of storage." end
       return "Take a POKéMON out of the Box."
@@ -271,6 +365,314 @@ return function(mod, ctx)
     return (s:gsub("[\r\n\v\f]+", " "):gsub("%s+$", ""))
   end
 
+  -- forward declaration: the grid painter below runs before the page helpers
+  -- (pageBegin) are defined further down, but is only *called* later, so a
+  -- forward local keeps pageBegin in its lexical scope
+  local pageBegin
+
+  -- ============================================================ the box GRID
+  -- THE MODERN BOX PAGE.  Bill's PC's box is drawn the way every game from
+  -- Generation III on draws it: a WALL of cells -- one per storage slot, each
+  -- holding the creature's own mini-icon -- instead of the classic column of
+  -- nickname rows (or, on Gold, the nickname rows beside a mon panel) this page
+  -- used to be.  Each generation's box page owns its own cursor and its own
+  -- writes now -- the engine's packed list is not driven (see M.g1BoxUpdate for
+  -- Gen 1 and M.g2BoxUpdate for Gold) -- and both arms call the one painter
+  -- below, so the two can never drift apart.
+  --
+  -- Geometry.  The left third is the mon card -- the modern PC's PKMN DATA
+  -- panel: the selected creature's front art, its name, its level and its
+  -- types.  The right two thirds are the grid, with the BOX banner (the loaded
+  -- box's own name, with the switch arrows beside it) as a strip above it.
+  -- Six columns is the modern PC's own column count; `spec.cellH` lets each
+  -- caller size the wall's rows for its own `Boxes.CAPACITY` (five rows at 30
+  -- with g9-boxes, four at the bare 20).
+  local COLS = 6
+  local DETAIL_W = 156
+  local CELL_GAP = 4
+  -- the icon's inset inside its slot face.  The slot is small (52x38 at 30
+  -- slots) and the pack's creature has to be READ in it, so the padding is
+  -- tight: every pixel here is a pixel the icon loses (portraits.lua crops the
+  -- pack's transparent cell margins away and fits the creature to this window)
+  local CELL_PAD = 3
+  local GRID_X = MARGIN + DETAIL_W + 12
+  local GRID_W = (W - MARGIN) - GRID_X
+  local STRIP_Y = Shell.CONTENT_Y
+  local STRIP_H = 30
+  local GRID_Y = Shell.CONTENT_Y + STRIP_H + 4
+  local GRID_H = Shell.FOOT_RULE_Y - GRID_Y
+  local CELL_W = math.floor(GRID_W / COLS)
+  local CELL_H = math.floor(GRID_H / 4)
+  local DETAIL_H = Shell.FOOT_RULE_Y - Shell.CONTENT_Y
+
+  -- The box's own capacity, off whatever the game data exposes (a mod may raise
+  -- it) and off the engine's own constant as the fallback.
+  local function boxCapacity(game)
+    local f = game and game.data and game.data.field
+    local n = f and (f.boxCapacity or f.pokemonBoxCap)
+    if type(n) == "number" and n > 0 then return n end
+    local okB, B = pcall(require, "src.pokemon.Boxes")
+    if okB and type(B) == "table" and type(B.CAPACITY) == "number" then
+      return B.CAPACITY
+    end
+    return 20
+  end
+
+  -- A single vector arrow.  The bundled face (Saira, and Plain Pixel before it)
+  -- has no U+25C0/U+25B6 glyphs, so the banner's switch arrows are triangles --
+  -- the same choice Theme.hints makes for an arrow key.
+  local function arrow(dir, cx, cy, r, color)
+    Theme.set(color or Theme.col.accent)
+    if dir == "left" then
+      love.graphics.polygon("fill", cx - r, cy, cx + r * 0.6, cy - r,
+        cx + r * 0.6, cy + r)
+    else
+      love.graphics.polygon("fill", cx + r, cy, cx - r * 0.6, cy - r,
+        cx - r * 0.6, cy + r)
+    end
+  end
+
+  -- A mon's own type names, through the engine's reader so a localized game
+  -- prints its own words; nil when the record has no types (a stripped boot, or
+  -- a mon the data does not know).  Mirrors the HALL OF FAME painter's rule.
+  local function monTypes(game, mon)
+    local data = game and game.data
+    local def = data and data.pokemon and data.pokemon[mon and mon.species]
+    local types = def and def.types
+    if type(types) ~= "table" then return nil end
+    local okT, TypeChart = pcall(require, "src.battle.TypeChart")
+    local function tn(t)
+      if t == nil then return nil end
+      if okT and type(TypeChart) == "table"
+          and type(TypeChart.displayName) == "function" then
+        local okD, s = pcall(TypeChart.displayName, t, game.data)
+        if okD and type(s) == "string" and s ~= "" then return display(s) end
+      end
+      return display(tostring(t))
+    end
+    local a, b = tn(types[1]), tn(types[2])
+    if not a then return nil end
+    if b and b ~= a then return a .. "/" .. b end
+    return a
+  end
+
+  -- The selected creature's front art in the card's window, as the WHOLE
+  -- creature at its own pixels (real size, whole-integer steps -- the suite's
+  -- one size rule), from the pack first and the engine's own pic as the
+  -- fall-back, the same order every other portrait here uses.
+  local function monArt(self, game, mon, x, y, w, h)
+    if Portraits and type(Portraits.drawFront) == "function" then
+      if Portraits.drawFront(Theme, game, mon, x, y, w, h) then return true end
+    end
+    if Gen2 and type(self.picFor) == "function" and g2pic then
+      local ok, img, trueColor = pcall(self.picFor, self, mon)
+      if ok and img then
+        g2pic(self, img, trueColor, mon.species, mon.shiny, x, y, w, h)
+        return true
+      end
+      return false
+    end
+    local okS, Sprites = pcall(require, "src.pokemon.Sprites")
+    local okA, Assets = pcall(require, "src.render.Assets")
+    if not (okS and okA and type(Sprites) == "table") then return false end
+    local okP, path = pcall(Sprites.path, game.data, mon.species, "front",
+      { mon = mon, kind = "summary" })
+    if not (okP and path) then return false end
+    local okI, img = pcall(Assets.image, path)
+    if not (okI and img) then return false end
+    local iw, ih = img:getDimensions()
+    if not (iw and ih and iw > 0 and ih > 0) then return false end
+    local d = 1
+    if iw > w or ih > h then
+      d = math.max(1, math.ceil(math.max(iw / w, ih / h)))
+    end
+    local s = 1 / d
+    Theme.set(Theme.col.white)
+    love.graphics.draw(img, math.floor(x + (w - iw * s) * 0.5),
+      math.floor(y + (h - ih * s) * 0.5), 0, s, s)
+    return true
+  end
+
+  -- The mon card: the art window, then the four lines the modern PC's panel
+  -- prints -- name, species, level + gender, types.
+  local function drawMonCard(self, game, mon, x, y, w, h)
+    local C, F = Theme.col, Theme.fonts(game)
+    Theme.panel(x, y, w, h, { radius = 8, shadow = 5, color = C.panel,
+      border = C.border })
+    if opt("ui_embellishment") ~= "false" then
+      Theme.brackets(x + 4, y + 4, w - 8, h - 8, 16, C.accentDim)
+    end
+    local px, py = x + 11, y + 13
+    local pw, ph = w - 22, 116
+    Theme.set(C.voidDeep, 1)
+    Theme.rect("fill", px, py, pw, ph, 6)
+    if mon and not monArt(self, game, mon, px, py, pw, ph) then
+      Theme.diamond(px + pw * 0.5, py + ph * 0.5, 8, C.accentDim)
+    end
+    local ty = py + ph + 12
+    if not mon then
+      Theme.text("—", x + 12, ty, F.body, "left", C.inkFaint)
+      return
+    end
+    -- the name steps DOWN a size rather than being cut: the PKMN DATA panel
+    -- must always show the whole name, and Theme.fit's ellipsis would leave a
+    -- half-word where the player expects their own creature's name
+    local nm = display(monName(mon, game))
+    local nf = F.body
+    if Theme.w(nm, F.body) > w - 24 then nf = F.small end
+    if Theme.w(nm, nf) > w - 24 then nf = F.tiny end
+    Theme.text(Theme.fit(nm, nf, w - 24), x + 12, ty, nf, "left", C.ink)
+    ty = ty + 26
+    local data = game and game.data
+    local def = data and data.pokemon and data.pokemon[mon.species]
+    local sp = display((def and def.name) or mon.species or "")
+    Theme.text(Theme.fit("/" .. sp, F.small, w - 24), x + 12, ty, F.small,
+      "left", C.inkFaint)
+    ty = ty + 20
+    local lv = mon.level and ("Lv%d"):format(mon.level) or "Lv?"
+    Theme.text(lv, x + 12, ty, F.body, "left", C.gold)
+    local gender = (mon.gender == "male" and "\xe2\x99\x82")
+      or (mon.gender == "female" and "\xe2\x99\x80") or nil
+    if gender then
+      Theme.text(gender, x + w - 14, ty, F.body, "right",
+        mon.gender == "female" and C.bad or C.accent)
+    end
+    ty = ty + 28
+    local types = monTypes(game, mon)
+    if types then
+      Theme.text(Theme.fit(types, F.small, w - 24), x + 12, ty, F.small,
+        "left", C.inkDim)
+    end
+  end
+
+  -- One grid cell: the slot's face, the creature's mini-icon when the slot
+  -- holds one, its held-item pip, and the cursor's own lit face + accent border.
+  local function drawCell(game, x, y, item, selected, F, ch)
+    local C = Theme.col
+    local cellH = ch or CELL_H
+    local fx = x + CELL_GAP * 0.5
+    local fy = y + CELL_GAP * 0.5
+    local fw = CELL_W - CELL_GAP
+    local fh = cellH - CELL_GAP
+    local mon = item and item.mon or nil
+    if selected then
+      Theme.panel(fx, fy, fw, fh, { radius = 6, shadow = 3,
+        color = C.panelLit, border = C.borderLit })
+    else
+      Theme.set(C.panelDeep, mon and 0.85 or 0.45)
+      Theme.rect("fill", fx, fy, fw, fh, 6)
+      Theme.set(C.border, mon and 0.55 or 0.32)
+      Theme.rect("line", fx + 0.5, fy + 0.5, fw - 1, fh - 1, 5)
+    end
+    if mon then
+      local iw, ih = fw - CELL_PAD * 2, fh - CELL_PAD * 2
+      local drew = Portraits and type(Portraits.drawIcon) == "function"
+        and Portraits.drawIcon(Theme, game, mon, fx + CELL_PAD, fy + CELL_PAD,
+          iw, ih)
+      if not drew then
+        Theme.diamond(fx + fw * 0.5, fy + fh * 0.5, 7, C.accentDim)
+      end
+      local held = mon.heldItem or mon.item
+      if type(held) == "number" and held > 0 then
+        Theme.set(C.gold)
+        Theme.rect("fill", fx + fw - 13, fy + fh - 13, 5, 5, 2)
+      end
+    elseif item and item.cancel then
+      Theme.text(Theme.fit(display(item.text or Strings("CANCEL")), F.tiny,
+        fw - 4), fx + fw * 0.5, fy + (fh - Theme.capOf(F.tiny)) * 0.5,
+        F.tiny, "center", selected and C.accent or C.inkFaint)
+    end
+    if selected then
+      Theme.set(C.accent, 0.85)
+      Theme.rect("line", fx + 0.5, fy + 0.5, fw - 1, fh - 1, 6)
+    end
+  end
+
+  -- The whole page.  `spec` carries the view each arm builds out of its own
+  -- engine state:
+  --   items        { { mon=, text=, cancel= }, ... }  one per engine row
+  --   index        the engine's cursor, counted in those rows
+  --   boxLabel     the banner's name (a box's own name, or "PARTY POKéMON")
+  --   canSwitchBox draw the banner's ◀ ▶ (the caller handles L/R itself)
+  --   detail       the mon the card shows (nil on the CANCEL row, and while a
+  --                Gold message has cleared the panel)
+  --   hints        the footer chips
+  local function drawBoxGrid(self, game, spec)
+    local C, F = Theme.col, Theme.fonts(game)
+    local items = spec.items or {}
+    local index = spec.index or 0
+
+    -- the box banner: the modern PC's own header strip, naming the loaded box
+    local sx, sw = GRID_X + 30, GRID_W - 60
+    Theme.panel(sx, STRIP_Y, sw, STRIP_H, { radius = 6, shadow = 2,
+      color = C.panelLit, border = C.border })
+    local label = Theme.fit(display(spec.boxLabel or ""), F.body, sw - 76)
+    Theme.text(label, sx + sw * 0.5, STRIP_Y + 7, F.body, "center", C.accent)
+    if spec.canSwitchBox then
+      arrow("left", sx + 17, STRIP_Y + STRIP_H * 0.5, 7, C.accent)
+      arrow("right", sx + sw - 17, STRIP_Y + STRIP_H * 0.5, 7, C.accent)
+    end
+    -- the cursor can sit ON the banner (row 0), where LEFT/RIGHT change BOX;
+    -- light the strip so it reads as the selected row
+    if spec.bannerCursor then
+      Theme.set(C.accent, 0.9)
+      Theme.rect("line", sx + 2.5, STRIP_Y + 2.5, sw - 5, STRIP_H - 5, 6)
+    end
+
+    -- the wall: every row of cells, the empty ones included, so a partial box
+    -- still reads as a box with room in it.  `spec.rows` fixes the wall's own
+    -- row count independently of `#items` -- the PARTY is six mons but it is
+    -- drawn on the SAME rows a box is, so a party cell is the size of a box
+    -- cell and the rest of the wall is simply empty.
+    local rows = math.max(1, spec.rows or math.ceil(#items / COLS))
+    local ch = spec.cellH or math.floor(GRID_H / rows)
+    for i = 1, rows * COLS do
+      local col = (i - 1) % COLS
+      local row = math.floor((i - 1) / COLS)
+      drawCell(game, GRID_X + col * CELL_W, GRID_Y + row * ch,
+        items[i], i == index, F, ch)
+    end
+
+    -- the mon in hand, lifted off the wall: the SAME mini-icon, raised and
+    -- with a shadow under it, drawn over the cursor's own lit cell.  Its home
+    -- cell is empty while it is held (the caller leaves it out of `items`).
+    if spec.held and spec.bannerCursor then
+      -- carrying a mon on the banner: it rides the strip while the boxes flip
+      local iw = STRIP_H - 8
+      local ix, iy = sx + sw - 56, STRIP_Y + 4
+      Theme.set(C.black, 0.28)
+      Theme.rect("fill", ix + 3, iy + iw - 5, iw - 6, 4, 2)
+      local drew = Portraits and type(Portraits.drawIcon) == "function"
+        and Portraits.drawIcon(Theme, game, spec.held, ix, iy, iw, iw)
+      if not drew then
+        Theme.diamond(ix + iw * 0.5, iy + iw * 0.5, 6, C.accentDim)
+      end
+    elseif spec.held then
+      local i = math.max(1, math.min(index or 1, rows * COLS))
+      local col = (i - 1) % COLS
+      local row = math.floor((i - 1) / COLS)
+      local fx = GRID_X + col * CELL_W + CELL_GAP * 0.5
+      local fy = GRID_Y + row * ch + CELL_GAP * 0.5
+      local fw, fh = CELL_W - CELL_GAP, ch - CELL_GAP
+      local lift = 7
+      Theme.set(C.black, 0.28)
+      Theme.rect("fill", fx + 5, fy + fh - 12, fw - 10, 6, 3)
+      local iw, ih = fw - CELL_PAD * 2, fh - CELL_PAD * 2
+      local drew = Portraits and type(Portraits.drawIcon) == "function"
+        and Portraits.drawIcon(Theme, game, spec.held,
+          fx + CELL_PAD, fy + CELL_PAD - lift, iw, ih)
+      if not drew then
+        Theme.diamond(fx + fw * 0.5, fy + fh * 0.5 - lift, 7, C.accentDim)
+      end
+    end
+
+    drawMonCard(self, game, spec.detail, MARGIN, Shell.CONTENT_Y, DETAIL_W,
+      DETAIL_H)
+    Shell.footer(Theme, game, { hints = spec.hints or MENU_HINTS,
+      gap = spec.gap, right = spec.notice })
+    Theme.set(C.white)
+  end
+
   -- ------------------------------------------------------- the mon submenu
   -- BoxMenu's monSubmenu: the ACTION / STATS / CANCEL box the engine pushes
   -- OVER a box list when a stored mon is chosen (bills_pc.asm
@@ -304,8 +706,618 @@ return function(mod, ctx)
     Shell.card(Theme, self.game, o)
   end
 
+  -- ===================================================== the Gen 1 box SLOT page
+  -- Gen 1's Bill's PC mon lists (src/ui/BoxMenu.lua's withdraw / deposit /
+  -- release rows) are the SAME modern slot page Gold gets (see the Gen 2
+  -- controller below, whose model this mirrors exactly): a box is a fixed
+  -- six-column wall of `Boxes.CAPACITY` cells (30 with g9-boxes, 20 without),
+  -- a mon's cell rides the mon (`mon.boxSlot`) so a hole in the middle of a box
+  -- survives a save, and the page owns its own cursor and its own writes -- the
+  -- engine's packed ListMenu is no longer driven (M.g1BoxUpdate replaces its
+  -- update).  The arrays run PARTY (0), BOX 1 .. BOX Boxes.COUNT, wrapping; the
+  -- banner row switches between them.  All three of Gen 1's box lists -- the
+  -- withdraw (renamed MOVE), the deposit and the release -- open this one page;
+  -- the deposit list simply starts the cursor on the PARTY.
+  local G1_PARTY_CELLS = 6
+  local G1_BOX_MENU_ROWS = { "MOVE", "STATS", "RELEASE", "CANCEL" }
+
+  local function g1boxes()
+    local ok, B = pcall(require, "src.pokemon.Boxes")
+    if ok and type(B) == "table" then return B end
+    return nil
+  end
+
+  local function g1boxCount()
+    local B = g1boxes()
+    local n = B and tonumber(B.COUNT)
+    return (n and n > 0) and n or 12
+  end
+
+  local function g1slotState(self)
+    local S = self.__g9slot
+    if S then return S end
+    local save = self.game and self.game.save
+    local start = 1
+    if self.kind == "pc_box_deposit" then
+      start = 0
+    elseif save and tonumber(save.currentBox) then
+      start = math.max(1, math.min(g1boxCount(), math.floor(save.currentBox)))
+    end
+    S = { idx = start, row = 1, col = 0, menu = nil, ask = nil,
+      askYes = true, held = nil, from = nil, notice = nil }
+    self.__g9slot = S
+    return S
+  end
+
+  -- a save's box table, materialised/typed before it is indexed (Boxes.ensure,
+  -- which g9-boxes widens to the whole box count; a bare save still gets 12)
+  local function g1ensureBoxes(save)
+    local B = g1boxes()
+    if B and type(B.ensure) == "function" then
+      local ok, boxes = pcall(B.ensure, save)
+      if ok and type(boxes) == "table" then return boxes end
+    end
+    save.boxes = save.boxes or {}
+    return save.boxes
+  end
+
+  -- The array a loaded index names: 0 is the PARTY, 1..COUNT a box.  A box is
+  -- handed back LIVE (created on demand), so a write here lands on the save.
+  local function g1arrayAt(self, i)
+    local save = (self.game and self.game.save) or {}
+    if i == 0 then
+      save.party = save.party or {}
+      return save.party
+    end
+    local boxes = g1ensureBoxes(save)
+    if type(boxes[i]) ~= "table" then boxes[i] = {} end
+    return boxes[i]
+  end
+
+  local function g1capacityAt(self, i)
+    if i == 0 then return G1_PARTY_CELLS end
+    return boxCapacity(self.game)
+  end
+
+  local function g1arrayName(self, i)
+    if i == 0 then return "PARTY POKéMON" end
+    local save = self.game and self.game.save
+    local names = save and save.boxNames
+    local custom = names and names[i]
+    if type(custom) == "string" and custom ~= "" then return display(custom) end
+    return ("%s %d"):format(word("BOX"), i)
+  end
+
+  local function g1packedIndex(list, mon)
+    for i = 1, #list do if list[i] == mon then return i end end
+    return nil
+  end
+
+  -- keep the SAVE's active box in step with the loaded array (no CHANGE BOX
+  -- prompt on the modern page; the engine writes the same byte through it)
+  local function g1setCurrent(self, i)
+    local save = self.game and self.game.save
+    if save and i >= 1 then save.currentBox = i end
+  end
+
+  local function g1playCry(self, mon)
+    if type(mon) ~= "table" or not mon.species then return end
+    local game = self.game
+    local ok, Sound = pcall(require, "src.core.Sound")
+    if ok and type(Sound) == "table" and type(Sound.playCry) == "function"
+        and game and game.data then
+      pcall(Sound.playCry, game.data, mon.species)
+    end
+  end
+
+  -- A mon leaving a BOX for the PARTY gets its stat block computed: a boxed
+  -- mon carries none (box_struct stops before MON_STATS), which the engine's
+  -- own withdraw does after _MoveMon's tail -- see src/ui/BoxMenu.lua's comment.
+  local function g1healForParty(game, mon)
+    if type(mon) ~= "table" then return end
+    local ok, Stats = pcall(require, "src.pokemon.Stats")
+    if not (ok and type(Stats) == "table" and type(Stats.ensure) == "function") then
+      return
+    end
+    local def = game and game.data and game.data.pokemon
+      and game.data.pokemon[mon.species]
+    pcall(Stats.ensure, def, mon)
+  end
+
+  -- the slot -> mon map for the loaded array, EXCLUDING the mon in hand (its
+  -- home cell reads empty while it is picked up).  A box mon with no valid
+  -- cell gets the first free one written onto it, so positions persist.
+  local function g1cells(self, S)
+    local cap = g1capacityAt(self, S.idx)
+    local list = g1arrayAt(self, S.idx)
+    local held = S.held
+    local bySlot = {}
+    if S.idx == 0 then
+      for i = 1, math.min(#list, cap) do
+        if list[i] ~= held then bySlot[i] = list[i] end
+      end
+      return bySlot, list, cap
+    end
+    local used, unplaced = {}, {}
+    for i = 1, #list do
+      local mon = list[i]
+      if mon ~= held then
+        local s = tonumber(mon.boxSlot)
+        if s and s == math.floor(s) and s >= 1 and s <= cap and not used[s] then
+          used[s] = true
+          bySlot[s] = mon
+        else
+          mon.boxSlot = nil
+          unplaced[#unplaced + 1] = mon
+        end
+      end
+    end
+    local n = 1
+    for _, mon in ipairs(unplaced) do
+      while bySlot[n] do n = n + 1 end
+      if n > cap then break end
+      bySlot[n] = mon
+      mon.boxSlot = n
+    end
+    return bySlot, list, cap
+  end
+
+  local function g1cursorCell(S, cap)
+    local cell = (S.row - 1) * COLS + S.col + 1
+    if cell > cap then cell = cap end
+    if cell < 1 then cell = 1 end
+    return cell
+  end
+
+  -- The arrays run PARTY, BOX 1, ..., BOX N and wrap: the last box's right step
+  -- lands on the PARTY and the PARTY's right on BOX 1 (left is the mirror).
+  local function g1switchArray(self, S, delta, stay)
+    local span = g1boxCount() + 1
+    S.idx = (S.idx + delta) % span
+    g1setCurrent(self, S.idx)
+    if stay then
+      S.row, S.col = 0, 0
+    else
+      S.row, S.col = 1, 0
+    end
+  end
+
+  -- MOVE's drop: the mon in hand goes into `slot`, swapping with whatever is
+  -- there (across arrays included).  A cross-array drop into the party needs a
+  -- free party cell; a cross-array drop on a full array is refused.
+  local function g1placeHeld(self, S, slot)
+    local mon, from = S.held, S.from
+    if not (mon and from) then return end
+    local game = self.game
+    local idx = S.idx
+    local bySlot, list, cap = g1cells(self, S)
+    local occupied = bySlot[slot]
+    if from.idx == idx then
+      if idx == 0 then
+        local a = g1packedIndex(list, mon)
+        if occupied then
+          local b = g1packedIndex(list, occupied)
+          if a and b then list[a], list[b] = list[b], list[a] end
+        elseif a then
+          table.remove(list, a)
+          table.insert(list, math.min(slot, #list + 1), mon)
+        end
+      elseif occupied then
+        local s = mon.boxSlot
+        mon.boxSlot = occupied.boxSlot
+        occupied.boxSlot = s
+      else
+        mon.boxSlot = slot
+      end
+    else
+      local src = from.idx
+      local srcList = g1arrayAt(self, src)
+      if occupied then
+        local si = g1packedIndex(srcList, mon)
+        local di = g1packedIndex(list, occupied)
+        if si and di then
+          table.remove(srcList, si)
+          table.remove(list, di)
+          table.insert(list, math.min(di, #list + 1), mon)
+          table.insert(srcList, math.min(si, #srcList + 1), occupied)
+          mon.boxSlot = (idx == 0) and nil or slot
+          occupied.boxSlot = (src == 0) and nil or from.slot
+          if idx == 0 then g1healForParty(game, mon) end
+        end
+      elseif idx == 0 then
+        if #list < G1_PARTY_CELLS then
+          local si = g1packedIndex(srcList, mon)
+          table.remove(srcList, si)
+          table.insert(list, mon)
+          mon.boxSlot = nil
+          g1healForParty(game, mon)
+        else
+          S.notice = "The PARTY is full."
+        end
+      else
+        local si = g1packedIndex(srcList, mon)
+        table.remove(srcList, si)
+        table.insert(list, mon)
+        mon.boxSlot = slot
+      end
+    end
+    S.held, S.from, S.ask = nil, nil, nil
+  end
+
+  -- A same-array BOX swap keeps a mon IN HAND (the displaced mon becomes the
+  -- one picked up), exactly as on Gold -- see g2swapHeldBox below.
+  local function g1swapHeldBox(self, S, slot)
+    local mon = S.held
+    local bySlot = g1cells(self, S)
+    local other = bySlot[slot]
+    if not (mon and other) then return end
+    local origin = mon.boxSlot
+    mon.boxSlot = other.boxSlot
+    other.boxSlot = origin
+    S.held = other
+    S.from = { idx = S.idx, slot = origin }
+    S.ask = nil
+  end
+
+  local function g1releaseMon(self, S, mon)
+    local list = g1arrayAt(self, S.idx)
+    local packed = g1packedIndex(list, mon)
+    if not packed then return end
+    table.remove(list, packed)
+    g1playCry(self, mon)
+    S.notice = "Released "
+      .. (mon.nickname or mon.name or mon.species or "?") .. "."
+  end
+
+  -- the engine's own Gen 1 status screen over the selected mon
+  local function g1openStatsMon(self, mon)
+    local game = self.game
+    if not (mon and game) then return end
+    local okS, Screens = pcall(require, "src.ui.Screens")
+    if not (okS and type(Screens) == "table"
+        and type(Screens.push) == "function") then return end
+    pcall(Screens.push, game, "SummaryMenu", mon)
+  end
+
+  local function g1chooseMenu(self, S)
+    local bySlot, list, cap = g1cells(self, S)
+    local cell = g1cursorCell(S, cap)
+    local mon = bySlot[cell]
+    local row = S.menu
+    S.menu = nil
+    if row == 1 then
+      if mon then
+        S.held = mon
+        S.from = { idx = S.idx, slot = cell }
+      end
+    elseif row == 2 then
+      if mon then g1openStatsMon(self, mon) end
+    elseif row == 3 then
+      if mon then
+        if mon.isEgg then
+          S.notice = "You can't release an EGG!"
+        else
+          S.ask = { kind = "release", mon = mon }
+          S.askYes = true
+        end
+      end
+    end
+  end
+
+  local function g1askLines(S)
+    local ask = S.ask
+    if not ask then return {} end
+    if ask.kind == "leave" then return { "Cancel box operations?" } end
+    if ask.kind == "swap" then return { "Swap POKéMON?" } end
+    if ask.kind == "release" then
+      local name = ask.mon
+        and (ask.mon.nickname or ask.mon.name or ask.mon.species) or "?"
+      return { "Release " .. name .. "?" }
+    end
+    return {}
+  end
+
+  local function g1resolveAsk(self, S)
+    local ask, yes = S.ask, S.askYes
+    S.ask = nil
+    if not ask then return end
+    if ask.kind == "leave" then
+      if yes then
+        local onCancel = self.onCancel
+        if type(self.close) == "function" then pcall(self.close, self)
+        else
+          local stack = self.game and self.game.stack
+          if stack and type(stack.pop) == "function" then pcall(stack.pop, stack) end
+        end
+        if type(onCancel) == "function" then pcall(onCancel) end
+      end
+    elseif ask.kind == "swap" then
+      if yes then
+        if S.idx >= 1 and S.from and S.from.idx == S.idx then
+          g1swapHeldBox(self, S, ask.target)
+        else
+          g1placeHeld(self, S, ask.target)
+        end
+      end
+    elseif ask.kind == "release" then
+      if yes then g1releaseMon(self, S, ask.mon) end
+    end
+  end
+
+  -- The Gen 1 box page's own input.  Replaces the engine's ListMenu:update
+  -- entirely: the engine's packed cursor and its CANCEL row are gone from this
+  -- page, so nothing else may drive it.
+  function M.g1BoxUpdate(self)
+    local input = self.game and self.game.input
+    if not (input and type(input.wasPressed) == "function") then return end
+    local S = g1slotState(self)
+
+    if S.notice then
+      if input:wasPressed("a") or input:wasPressed("b") then S.notice = nil end
+      return
+    end
+    if S.ask then
+      if input:wasPressed("up") or input:wasPressed("down")
+          or input:wasPressed("left") or input:wasPressed("right") then
+        S.askYes = not S.askYes
+      end
+      if input:wasPressed("b") then S.ask = nil return end
+      if input:wasPressed("a") then g1resolveAsk(self, S) end
+      return
+    end
+    if S.menu then
+      if input:wasPressed("up") then
+        S.menu = S.menu > 1 and S.menu - 1 or #G1_BOX_MENU_ROWS
+      elseif input:wasPressed("down") then
+        S.menu = S.menu < #G1_BOX_MENU_ROWS and S.menu + 1 or 1
+      elseif input:wasPressed("a") then
+        g1chooseMenu(self, S)
+      elseif input:wasPressed("b") then
+        S.menu = nil
+      end
+      return
+    end
+
+    local bySlot, list, cap = g1cells(self, S)
+    local rows = math.max(1, math.ceil(cap / COLS))
+    if S.row > 0 and S.row > rows then S.row = rows end
+    if S.col > COLS - 1 then S.col = COLS - 1 end
+
+    if input:wasPressed("up") then
+      if S.row > 0 then S.row = S.row - 1 end
+    elseif input:wasPressed("down") then
+      if S.row == 0 then S.row = 1 else S.row = math.min(rows, S.row + 1) end
+    elseif input:wasPressed("left") then
+      if S.row == 0 then
+        g1switchArray(self, S, -1, true)
+      else
+        local cell = g1cursorCell(S, cap) - 1
+        if cell < 1 then cell = cap end
+        S.row = math.floor((cell - 1) / COLS) + 1
+        S.col = (cell - 1) % COLS
+      end
+    elseif input:wasPressed("right") then
+      if S.row == 0 then
+        g1switchArray(self, S, 1, true)
+      else
+        local cell = g1cursorCell(S, cap) + 1
+        if cell > cap then cell = 1 end
+        S.row = math.floor((cell - 1) / COLS) + 1
+        S.col = (cell - 1) % COLS
+      end
+    elseif input:wasPressed("a") then
+      if S.row == 0 then
+        -- the banner is a box picker, not a cell: A does nothing on it
+      else
+        local cell = g1cursorCell(S, cap)
+        local mon = bySlot[cell]
+        if S.held then
+          if not mon then
+            g1placeHeld(self, S, cell)
+          elseif mon ~= S.held then
+            S.ask = { kind = "swap", target = cell, mon = mon }
+            S.askYes = true
+          end
+        elseif mon then
+          S.menu = 1
+        end
+      end
+    elseif input:wasPressed("b") then
+      if S.held then
+        S.notice = "You can't leave while holding a POKéMON."
+      else
+        S.ask = { kind = "leave" }
+        S.askYes = true
+      end
+    end
+  end
+
+  -- A Bill's PC mon list as the slot page.  The engine's ListMenu is still on
+  -- the stack (and still holds the push/close contract), but its packed rows
+  -- are ignored: the page reads the save's arrays through mon.boxSlot, the way
+  -- Gold's does.
+  function M.drawBoxList(self)
+    local game, emb = pageBegin(self)
+    local S = g1slotState(self)
+    local bySlot, list, cap = g1cells(self, S)
+    local items = {}
+    for i = 1, cap do items[i] = { mon = bySlot[i] } end
+    local onBanner = (S.row == 0)
+    local index = onBanner and 0 or g1cursorCell(S, cap)
+    local selected = bySlot[index]
+    local banner = g1arrayName(self, S.idx)
+    local right
+    if S.idx == 0 then
+      right = ("%s %d/%d"):format(word("PARTY"), #list, cap)
+    else
+      right = ("%s %d/%d   %d/%d"):format(word("BOX"), S.idx, g1boxCount(), #list, cap)
+    end
+    local caption = "Choose a POKéMON."
+    if S.held then
+      caption = onBanner and "Pick a BOX to move it to."
+        or "Choose a slot to place it in."
+    elseif onBanner then
+      caption = "Pick a BOX."
+    elseif S.ask and S.ask.kind == "leave" then
+      caption = "Cancel box operations?"
+    end
+    Shell.top(Theme, game, {
+      title = "BILL's PC", right = right, caption = caption,
+      money = Shell.money(game), embellish = emb,
+    })
+    local hints
+    if S.held then
+      hints = {
+        { key = "\xe2\x86\x90\xe2\x86\x92", text = "BOX" },
+        { key = "A", text = "PLACE" },
+        { key = "B", text = "BACK" },
+      }
+    else
+      hints = {
+        { key = "\xe2\x86\x90\xe2\x86\x92", text = "BOX" },
+        { key = "A", text = "OK" },
+        { key = "B", text = "CANCEL" },
+      }
+    end
+    local rows = math.max(1, math.ceil(boxCapacity(game) / COLS))
+    drawBoxGrid(self, game, {
+      items = items, index = index, boxLabel = banner,
+      canSwitchBox = true, detail = S.held or selected,
+      held = S.held, bannerCursor = onBanner, hints = hints, gap = 18,
+      rows = rows,
+    })    if S.menu then
+      local rows = {}
+      for _, label in ipairs(G1_BOX_MENU_ROWS) do
+        rows[#rows + 1] = { text = label }
+      end
+      pcCard(self, { title = "WHAT'S UP?", rows = rows, index = S.menu,
+        w = 300 })
+    elseif S.ask then
+      pcCard(self, { lines = g1askLines(S), yesno = S.askYes and 1 or 2,
+        w = 420 })
+    elseif S.notice then
+      pcCard(self, { lines = { S.notice }, w = 420 })
+    end
+    Theme.set(Theme.col.white)
+  end
+
+  -- ============================================== Bill's PC's own MENU rows
+  -- BILL's PC's top menu (screenId "BoxMenu") is the engine's own Menu: its
+  -- first row is WITHDRAW POKéMON, which the suite relabels MOVE because the
+  -- page it opens is the modern move/slot page.  Two of the engine's rows are
+  -- retuned before that page is dressed:
+  --
+  --   * MOVE -- the engine's `withdraw(game)` refuses outright when the party
+  --     is full (`#party >= Party.MAX`), which made sense when the list could
+  --     only pull a mon OUT to the party.  The slot page MOVES a mon anywhere
+  --     (box to box included), so a full party is no reason to refuse it.  The
+  --     row's onSelect is replaced with `M.g1openMoveList`, which pushes the
+  --     very same `pc_box_withdraw` ListMenu -- empty-box message and all --
+  --     without the party gate.  The suite dresses that list into the slot page.
+  --   * DEPOSIT POKéMON -- dropped entirely: depositing is what the slot page's
+  --     PARTY array already does (pick a party mon up, drop it in a box), so the
+  --     row has nothing left to do.  Gold's storage menu loses the same row
+  --     (see M.g2TameStorage).
+  --
+  -- Row identity: the engine appends these in a fixed order (WITHDRAW,
+  -- DEPOSIT, RELEASE, CHANGE BOX, [PRINT BOX], SEE YA!), so the position is
+  -- the fallback and the (display-expanded) label is the sanity check -- a
+  -- localized cart still gets the right two rows.
+  function M.g1TameBoxMenu(state)
+    local items = state and state.items
+    if type(items) ~= "table" then return end
+    local move, deposit
+    for i, it in ipairs(items) do
+      if type(it) == "table" then
+        local label = display(it.label or "")
+        if not move and label:find("^WITHDRAW POK") then move = i end
+        if not deposit and label:find("^DEPOSIT POK") then deposit = i end
+      end
+    end
+    move = move or 1
+    deposit = deposit or 2
+    local moveItem = items[move]
+    if type(moveItem) == "table" then
+      -- Rename the row to MOVE here, by POSITION, not by its (possibly
+      -- translated) label: under a translation mod the engine's "WITHDRAW
+      -- POKéMON" reads e.g. "SACAR POKéMON" and `pcMoveLabel`'s English
+      -- pattern never matches, so the row kept saying "withdraw".  The suite's
+      -- own "MOVE" is then localized at draw like any other lexicon word.
+      moveItem.label = "MOVE"
+      -- keep the engine's keepOpen contract (hollow cursor while a child is up)
+      -- and open the gate-free list instead of withdraw(game)
+      moveItem.onSelect = function()
+        state.hollowIndex = state.index
+        M.g1openMoveList(state)
+      end
+    end
+    if items[deposit] then table.remove(items, deposit) end
+    if (state.index or 1) > #items then state.index = 1 end
+  end
+
+  -- The engine's BoxMenu.withdraw, minus its party-full refusal: push the
+  -- `pc_box_withdraw` list (the slot page takes it over in M.dress).  A box that
+  -- has no POKéMON in it keeps the cart's own "What? There are no POKéMON here!"
+  -- message, exactly as the engine's version prints it.
+  function M.g1openMoveList(state)
+    local game = state and state.game
+    if not game or not game.stack then return end
+    local LM = listClass()
+    if not LM then return end
+    local save = game.save
+    local box = {}
+    local B = g1boxes()
+    if B and type(B.active) == "function" then
+      if type(B.ensure) == "function" then pcall(B.ensure, save) end
+      local ok, v = pcall(B.active, save)
+      if ok and type(v) == "table" then box = v end
+    elseif type(save) == "table" and type(save.boxes) == "table" then
+      box = save.boxes[save.currentBox or 1] or {}
+    end
+    if #box == 0 then
+      local okT, TextBox = pcall(require, "src.render.TextBox")
+      if okT and type(TextBox) == "table"
+          and type(TextBox.new) == "function" then
+        local t = game.data and game.data.text
+        game.stack:push(TextBox.new(game, (t and t._NoMonText)
+          or Strings("What? There are\nno POKéMON here!")))
+        return
+      end
+    end
+    local items = {}
+    for i, mon in ipairs(box) do
+      items[#items + 1] = {
+        label = monName(mon, game),
+        sub = Strings(":L%d", mon.level or 0),
+        value = i,
+      }
+    end
+    items[#items + 1] = { cancel = true, label = Strings("CANCEL") }
+    game.stack:push(LM.new(game, nil, items, {
+      noSound = true, kind = "pc_box_withdraw", itemBox = true,
+    }))
+  end
+
+  -- Gold's storage menu (Gen2PcMenu, screenId "Gen2PcMenu", the screen BILL's PC
+  -- opens): its DEPOSIT POKéMON row goes the way of Gen 1's -- the slot page's
+  -- PARTY array is the deposit route.  `state.entries` drives both the drawn rail
+  -- (M.g2DrawStorage) and the engine's own cursor/choose in PcMenu:update, so
+  -- dropping the one entry here is all it takes; SEE YA! and MAIL BOX stay.
+  function M.g2TameStorage(state)
+    local entries = state and state.entries
+    if type(entries) ~= "table" then return end
+    local out = {}
+    for _, entry in ipairs(entries) do
+      if type(entry) ~= "table" or entry.id ~= "deposit" then
+        out[#out + 1] = entry
+      end
+    end
+    state.entries = out
+    if (state.index or 1) > #out then state.index = math.max(1, #out) end
+  end
+
   -- --------------------------------------------------------------- page draw
-  local function pageBegin(self)
+  pageBegin = function(self)
     local game = self.game
     local bg = opt("ui_background") ~= "false"
     local emb = opt("ui_embellishment") ~= "false"
@@ -352,7 +1364,7 @@ return function(mod, ctx)
       end
       local rows = {}
       for i, it in ipairs(self.items or {}) do
-        rows[#rows + 1] = { text = display(it.label or "") }
+        rows[#rows + 1] = { text = pcMoveLabel(display(it.label or "")) }
       end
       local title, right
       if list then
@@ -394,13 +1406,13 @@ return function(mod, ctx)
       for i, it in ipairs(self.items or {}) do
         local count = boxes and boxes[i] and #boxes[i] or 0
         rows[#rows + 1] = {
-          text = display(it.label or ("BOX%2d"):format(i)),
+          text = display(it.label or ("%s%2d"):format(word("BOX"), i)),
           right = (count > 0) and tostring(count) or nil,
           marker = (i == box),
         }
       end
       title = "CHANGE BOX"
-      right = ("BOX %d ACTIVE"):format(box)
+      right = ("%s %d ACTIVE"):format(word("BOX"), box)
       caption = "Pick the active POKéMON BOX."
       index = self.index
       rowH = 20
@@ -420,6 +1432,10 @@ return function(mod, ctx)
     -- The three menus share one shape: a titled row list with the selected
     -- row's description under it.
     rows = rowsFromItems(self.items)
+    -- Bill's PC's own WITHDRAW row opens the (now) move page: it reads MOVE
+    if sid == "BoxMenu" then
+      for _, r in ipairs(rows) do r.text = pcMoveLabel(r.text) end
+    end
     index = self.index - (self.scroll or 0)
     rowH = 32
 
@@ -443,7 +1459,7 @@ return function(mod, ctx)
         if okE then box = ensured[(game.save.currentBox or 1)] end
       end
       local n = box and #box or 0
-      right = ("BOX %d  %d/%d"):format(game.save.currentBox or 1, n,
+      right = ("%s %d  %d/%d"):format(word("BOX"), game.save.currentBox or 1, n,
         (cap or (okB and B.CAPACITY) or 20))
     else
       title = "PC"
@@ -451,7 +1467,7 @@ return function(mod, ctx)
     end
 
     local sel = self.items and self.items[self.index]
-    caption = sel and describe(sel.label) or nil
+    caption = sel and describe(pcMoveLabel(sel.label)) or nil
 
     Shell.top(Theme, game, {
       title = title, right = right, caption = caption,
@@ -478,6 +1494,8 @@ return function(mod, ctx)
   }
 
   function M.drawList(self)
+    -- Bill's PC's own mon lists are the modern box GRID (see M.drawBoxList)
+    if BOX_LIST_KINDS[self.kind] then return M.drawBoxList(self) end
     local game, emb = pageBegin(self)
     local C = Theme.col
     local spec = LIST_SPEC[self.kind] or { title = "PC" }
@@ -523,7 +1541,7 @@ return function(mod, ctx)
     end
     local right = nil
     if spec.box then
-      right = ("BOX %d"):format(game.save.currentBox or 1)
+      right = ("%s %d"):format(word("BOX"), game.save.currentBox or 1)
     end
 
     Shell.top(Theme, game, {
@@ -602,6 +1620,25 @@ return function(mod, ctx)
       return display(s)
     end
     return nil
+  end
+
+  -- A menu ENTRY as the row it draws.  The withdraw row is renamed to MOVE
+  -- (the page it opens is a move/slot page) and that identity comes from the
+  -- entry's STABLE ID, never its text: under a translation mod the engine
+  -- renders "WITHDRAW POKéMON" as e.g. "SACAR POKéMON", which the English-only
+  -- `pcMoveLabel` pattern below cannot match -- the old text-based rename
+  -- silently did nothing and the row stayed "withdraw".  Everything else keeps
+  -- the engine's own (already localized) label.
+  local function entryLabel(entry, i)
+    if type(entry) == "table" and entry.id == "withdraw" then return "MOVE" end
+    return pcMoveLabel(g2text(entry) or tostring(i))
+  end
+
+  local function entryDescribe(entry)
+    if type(entry) == "table" and entry.id == "withdraw" then
+      return "Move a POKéMON between BOXes."
+    end
+    return describe(pcMoveLabel(g2text(entry) or ""))
   end
 
   -- An engine page as display lines.  A page may be a string (its \n and \v are
@@ -833,7 +1870,7 @@ return function(mod, ctx)
     local names = save and save.boxNames
     local custom = names and names[i]
     if type(custom) == "string" and custom ~= "" then return display(custom) end
-    return ("BOX%d"):format(i)
+    return ("%s%d"):format(word("BOX"), i)
   end
 
   local function g2boxCount(save, i)
@@ -876,7 +1913,7 @@ return function(mod, ctx)
     return G2Pal or nil
   end
 
-  local function g2pic(self, img, trueColor, species, shiny, x, y, w, h)
+  g2pic = function(self, img, trueColor, species, shiny, x, y, w, h)
     if not (img and img.getDimensions) then
       Theme.diamond(x + w * 0.5, y + h * 0.5, 9, Theme.col.accentDim)
       return
@@ -922,12 +1959,13 @@ return function(mod, ctx)
     local entries = self.entries or {}
     local rows = {}
     for i, entry in ipairs(entries) do
-      rows[#rows + 1] = { label = g2text(entry) or tostring(i) }
+      rows[#rows + 1] = { label = entryLabel(entry, i) }
     end
     local sel = entries[self.index]
     Shell.top(Theme, game, {
       title = "PC",
-      right = ("%d SYSTEM%s"):format(#rows, #rows == 1 and "" or "S"),
+      right = ("%d %s"):format(#rows,
+        word(#rows == 1 and "SYSTEM" or "SYSTEMS")),
       caption = describe(g2text(sel) or "") or "Access whose PC?",
       money = Shell.money(game), embellish = emb,
     })
@@ -975,12 +2013,12 @@ return function(mod, ctx)
     local entries = self.entries or {}
     local rows = {}
     for i, entry in ipairs(entries) do
-      rows[#rows + 1] = { label = g2text(entry) or tostring(i) }
+      rows[#rows + 1] = { label = entryLabel(entry, i) }
     end
     local sel = entries[self.index]
     -- the active box's own contents, as the right-hand card
     local boxRows = {
-      { header = ("BOX %d/%d"):format(box, total) },
+      { header = ("%s %d/%d"):format(word("BOX"), box, total) },
       { text = "SLOTS", value = ("%d/%d"):format(count, cap) },
     }
     local list
@@ -1069,7 +2107,7 @@ return function(mod, ctx)
     Shell.top(Theme, game, {
       title = "STORAGE",
       right = ("%s  %d/%d"):format(g2boxName(save, box), count, cap),
-      caption = describe(g2text(sel) or "") or "What do you want to do?",
+      caption = entryDescribe(sel) or "What do you want to do?",
       money = Shell.money(game), embellish = emb,
     })
     Shell.rows(Theme, game, {
@@ -1256,183 +2294,545 @@ return function(mod, ctx)
   end
 
   -- =============================================================== BILL's BOX
-  -- The box list: the left mon panel (portrait, level, gender, name), the five
-  -- nickname rows, the MOVE / WITHDRAW / DEPOSIT / RELEASE / STATS submenu, the
-  -- insert destination cursor and the timed hold.
+  -- The box page is a MODERN SLOT PC now.  A box is a fixed 6x5 wall of
+  -- SLOT_COUNT cells; a mon's cell rides the mon itself (mon.boxSlot), so an
+  -- empty cell in the middle of a box survives a save -- which a packed list
+  -- cannot express.  The page owns its own cursor and its own input:
+  --   * A on a mon opens MOVE / STATS / RELEASE / CANCEL
+  --   * MOVE picks the icon up (the same mini-icon, lifted, with a shadow);
+  --     A on an empty cell drops it there; A on an occupied cell asks
+  --     "Swap POKéMON?" and, on YES, the two mons trade cells -- and, when
+  --     they are in different arrays, trade arrays too; the displaced mon
+  --     becomes the one in hand
+  --   * the arrow keys walk the grid; at a cell's edge they WRAP inside the
+  --     array, and only at the array's own first/last cell do they step to the
+  --     previous/next array -- the boxes AND the PARTY (box 0) -- so holding a
+  --     mon and stepping to another array is how it crosses between a box and
+  --     the party
+  --   * B asks "Cancel box operations?" with YES/NO; trying to leave while
+  --     holding a mon is refused with a warning instead
+  -- The engine's own BoxMenu model (its packed list, its insert cursor, its
+  -- phases) is left in place but not driven: this controller reads the save's
+  -- arrays directly and writes them itself.
+  local SLOT_COLS = 6
+  local PARTY_CELLS = 6
+  local BOX_MENU_ROWS = { "MOVE", "STATS", "RELEASE", "CANCEL" }
+
+  -- The controller's own state, hung on the engine's BoxMenu object.  `idx` is
+  -- the loaded array: 0 is the PARTY, 1..NUM_BOXES a box.
+  local function g2slotState(self)
+    local S = self.__g9slot
+    if S then return S end
+    S = {
+      idx = (self.mode == "deposit") and 0 or (self.boxIndex or 1),
+      row = 1, col = 0,
+      menu = nil, ask = nil, askYes = true, held = nil, from = nil,
+      notice = nil,
+    }
+    self.__g9slot = S
+    -- listAt(0) must mean the PARTY from here on, and stepBox's own walk must
+    -- be able to reach box 0.
+    self.mode = "move"
+    return S
+  end
+
+  local function g2arrayAt(self, i)
+    if i == 0 then
+      self.save.party = self.save.party or {}
+      return self.save.party
+    end
+    local B = boxModel()
+    if B and type(B.box) == "function" then
+      local ok, v = pcall(B.box, self.save, i)
+      if ok and type(v) == "table" then return v end
+    end
+    self.save.boxes = self.save.boxes or {}
+    self.save.boxes[i] = self.save.boxes[i] or {}
+    return self.save.boxes[i]
+  end
+
+  local function g2capacityAt(self, i)
+    if i == 0 then return PARTY_CELLS end
+    return g2boxCap(self.save)
+  end
+
+  local function g2numArrays(self)
+    local B = boxModel()
+    return (B and type(B.NUM_BOXES) == "number" and B.NUM_BOXES) or 14
+  end
+
+  local function g2arrayName(self, i)
+    if i == 0 then return "PARTY POKéMON" end
+    return g2boxName(self.save, i)
+  end
+
+  local function g2packedIndex(list, mon)
+    for i = 1, #list do if list[i] == mon then return i end end
+    return nil
+  end
+
+  local function g2partyMailFix(save, slot)
+    if not slot then return end
+    local ok, Mail = pcall(require, "src.core.gen2.Mail")
+    if ok and type(Mail) == "table" and type(Mail.removeSlot) == "function" then
+      pcall(Mail.removeSlot, save, slot)
+    end
+  end
+
+  local function g2healForBox(mon)
+    if type(mon) ~= "table" then return end
+    local B = boxModel()
+    if B and type(B.enterBox) == "function" then
+      pcall(B.enterBox, mon)
+      return
+    end
+    mon.status, mon.statusTurns = nil, nil
+    mon.hp = mon.isEgg and 0 or (mon.maxHp or mon.hp)
+  end
+
+  local function g2healForParty(mon)
+    if type(mon) ~= "table" then return end
+    mon.status, mon.statusTurns = nil, nil
+    mon.hp = mon.isEgg and 0 or (mon.maxHp or mon.hp)
+  end
+
+  -- the slot -> mon map for the loaded array, EXCLUDING the mon in hand (so
+  -- its home cell reads empty while it is picked up).  A box mon with no valid
+  -- cell gets the first free one written onto it, so positions persist.
+  local function g2cells(self, S)
+    local cap = g2capacityAt(self, S.idx)
+    local list = g2arrayAt(self, S.idx)
+    local held = S.held
+    local bySlot = {}
+    if S.idx == 0 then
+      for i = 1, math.min(#list, cap) do
+        if list[i] ~= held then bySlot[i] = list[i] end
+      end
+      return bySlot, list, cap
+    end
+    local used, unplaced = {}, {}
+    for i = 1, #list do
+      local mon = list[i]
+      if mon ~= held then
+        local s = tonumber(mon.boxSlot)
+        if s and s == math.floor(s) and s >= 1 and s <= cap and not used[s] then
+          used[s] = true
+          bySlot[s] = mon
+        else
+          mon.boxSlot = nil
+          unplaced[#unplaced + 1] = mon
+        end
+      end
+    end
+    local n = 1
+    for _, mon in ipairs(unplaced) do
+      while bySlot[n] do n = n + 1 end
+      if n > cap then break end
+      bySlot[n] = mon
+      mon.boxSlot = n
+    end
+    return bySlot, list, cap
+  end
+
+  local function g2cursorCell(S, cap)
+    local cell = (S.row - 1) * SLOT_COLS + S.col + 1
+    if cell > cap then cell = cap end
+    if cell < 1 then cell = 1 end
+    return cell
+  end
+
+  -- The arrays run PARTY, BOX 1, ..., BOX N and wrap: the last box's right step
+  -- lands on the PARTY and the PARTY's right on BOX 1 (left is the mirror).
+  local function g2switchArray(self, S, delta, stay)
+    local span = g2numArrays(self) + 1
+    S.idx = (S.idx + delta) % span
+    self.boxIndex = S.idx
+    local B = boxModel()
+    if S.idx >= 1 and B and type(B.setCurrent) == "function" then
+      pcall(B.setCurrent, self.save, S.idx)
+    end
+    -- on the BOX banner the cursor stays there (so a held mon is carried across
+    -- the boxes); otherwise land on the new array's first cell
+    if stay then
+      S.row, S.col = 0, 0
+    else
+      S.row, S.col = 1, 0
+    end
+  end
+
+  -- MOVE's drop: the mon in hand goes into `slot`, swapping with whatever is
+  -- there (across arrays included).  A cross-array drop that lands in the party
+  -- needs a free party slot; a cross-array drop on a full array is refused.
+  local function g2placeHeld(self, S, slot)
+    local mon, from = S.held, S.from
+    if not (mon and from) then return end
+    local idx = S.idx
+    local bySlot, list, cap = g2cells(self, S)
+    local occupied = bySlot[slot]
+    if from.idx == idx then
+      if idx == 0 then
+        local a = g2packedIndex(list, mon)
+        if occupied then
+          local b = g2packedIndex(list, occupied)
+          if a and b then list[a], list[b] = list[b], list[a] end
+        elseif a then
+          table.remove(list, a)
+          table.insert(list, math.min(slot, #list + 1), mon)
+        end
+      elseif occupied then
+        local s = mon.boxSlot
+        mon.boxSlot = occupied.boxSlot
+        occupied.boxSlot = s
+      else
+        mon.boxSlot = slot
+      end
+    else
+      local src = from.idx
+      local srcList = g2arrayAt(self, src)
+      if occupied then
+        local si = g2packedIndex(srcList, mon)
+        local di = g2packedIndex(list, occupied)
+        if si and di then
+          table.remove(srcList, si)
+          table.remove(list, di)
+          table.insert(list, math.min(di, #list + 1), mon)
+          table.insert(srcList, math.min(si, #srcList + 1), occupied)
+          mon.boxSlot = (idx == 0) and nil or slot
+          occupied.boxSlot = (src == 0) and nil or from.slot
+          if idx >= 1 then g2healForBox(mon) end
+          if src >= 1 then g2healForBox(occupied) end
+        end
+      elseif idx == 0 then
+        if #list < PARTY_CELLS then
+          local si = g2packedIndex(srcList, mon)
+          table.remove(srcList, si)
+          g2partyMailFix(self.save, si)
+          table.insert(list, mon)
+          mon.boxSlot = nil
+          g2healForParty(mon)
+        else
+          S.notice = "The PARTY is full."
+        end
+      else
+        local si = g2packedIndex(srcList, mon)
+        table.remove(srcList, si)
+        if src == 0 then g2partyMailFix(self.save, si) end
+        table.insert(list, mon)
+        mon.boxSlot = slot
+        g2healForBox(mon)
+      end
+    end
+    S.held, S.from, S.ask = nil, nil, nil
+  end
+
+  -- A same-array BOX swap keeps a mon IN HAND: the held mon takes the target
+  -- cell and the mon that was there becomes the one picked up -- its saved cell
+  -- is the held mon's old cell, so the two positions are exchanged and no cell
+  -- is ever shown holding two mons.  That is what the cart's own move does:
+  -- drop on an occupied cell, confirm the swap, and you are now carrying the
+  -- mon that used to be there.  A cross-array drop, or a swap inside the party
+  -- (whose array is packed and has no cells to trade), is the plain exchange in
+  -- g2placeHeld instead.
+  local function g2swapHeldBox(self, S, slot)
+    local mon = S.held
+    local bySlot = g2cells(self, S)
+    local other = bySlot[slot]
+    if not (mon and other) then return end
+    local origin = mon.boxSlot
+    mon.boxSlot = other.boxSlot
+    other.boxSlot = origin
+    S.held = other
+    S.from = { idx = S.idx, slot = origin }
+    S.ask = nil
+  end
+
+  local function g2releaseMon(self, S, mon)
+    local idx = S.idx
+    local list = g2arrayAt(self, idx)
+    local packed = g2packedIndex(list, mon)
+    if not packed then return end
+    local B = boxModel()
+    local released = false
+    if idx == 0 and B and type(B.releaseFromParty) == "function" then
+      local pok, ok2 = pcall(B.releaseFromParty, self.save, packed)
+      released = pok and ok2 and true or false
+    elseif idx >= 1 and B and type(B.release) == "function" then
+      local pok, ok2 = pcall(B.release, self.save, idx, packed)
+      released = pok and ok2 and true or false
+    end
+    if not released then table.remove(list, packed) end
+    if type(self.playMonCry) == "function" then pcall(self.playMonCry, self, mon) end
+    S.notice = "Released " .. (mon.nickname or mon.name or mon.species or "?") .. "."
+  end
+
+  local function g2openStatsMon(self, mon)
+    local game = self.game
+    if not (mon and game) then return end
+    local okS, Screens = pcall(require, "src.ui.Screens")
+    if not (okS and type(Screens) == "table" and type(Screens.push) == "function") then
+      return
+    end
+    local okGet = pcall(Screens.get, game, "Gen2SummaryMenu")
+    if not okGet then return end
+    pcall(Screens.push, game, "Gen2SummaryMenu", {
+      mon = mon, save = self.save,
+      onClose = function() game.stack:pop() end,
+    })
+  end
+
+  local function g2chooseMenu(self, S)
+    local bySlot, list, cap = g2cells(self, S)
+    local cell = g2cursorCell(S, cap)
+    local mon = bySlot[cell]
+    local row = S.menu
+    S.menu = nil
+    if row == 1 then
+      if mon then
+        S.held = mon
+        S.from = { idx = S.idx, packed = g2packedIndex(list, mon), slot = cell }
+      end
+    elseif row == 2 then
+      if mon then g2openStatsMon(self, mon) end
+    elseif row == 3 then
+      if mon then
+        if mon.isEgg then
+          S.notice = "You can't release an EGG!"
+        else
+          S.ask = { kind = "release", mon = mon }
+          S.askYes = true
+        end
+      end
+    end
+  end
+
+  local function g2askLines(S)
+    local ask = S.ask
+    if not ask then return {} end
+    if ask.kind == "leave" then return { "Cancel box operations?" } end
+    if ask.kind == "swap" then return { "Swap POKéMON?" } end
+    if ask.kind == "release" then
+      local name = ask.mon and (ask.mon.nickname or ask.mon.name or ask.mon.species)
+        or "?"
+      return { "Release " .. name .. "?" }
+    end
+    return {}
+  end
+
+  local function g2resolveAsk(self, S)
+    local ask, yes = S.ask, S.askYes
+    S.ask = nil
+    if not ask then return end
+    if ask.kind == "leave" then
+      if yes then
+        if type(self.onClose) == "function" then pcall(self.onClose, self)
+        else
+          local stack = self.game and self.game.stack
+          if stack and type(stack.pop) == "function" then pcall(stack.pop, stack) end
+        end
+      end
+    elseif ask.kind == "swap" then
+      if yes then
+        if S.idx >= 1 and S.from and S.from.idx == S.idx then
+          g2swapHeldBox(self, S, ask.target)
+        else
+          g2placeHeld(self, S, ask.target)
+        end
+      end
+    elseif ask.kind == "release" then
+      if yes then g2releaseMon(self, S, ask.mon) end
+    end
+  end
+
+  -- The box page's own input.  Replaces the engine's BoxMenu:update entirely:
+  -- the engine's packed cursor, its insert phase and its CANCEL row are gone
+  -- from this page, so nothing else may drive it.
+  function M.g2BoxUpdate(self)
+    local input = self.game and self.game.input
+    if not (input and type(input.wasPressed) == "function") then return end
+    local S = g2slotState(self)
+
+    if S.notice then
+      if input:wasPressed("a") or input:wasPressed("b") then S.notice = nil end
+      return
+    end
+    if S.ask then
+      if input:wasPressed("up") or input:wasPressed("down")
+          or input:wasPressed("left") or input:wasPressed("right") then
+        S.askYes = not S.askYes
+      end
+      if input:wasPressed("b") then S.ask = nil return end
+      if input:wasPressed("a") then g2resolveAsk(self, S) end
+      return
+    end
+    if S.menu then
+      if input:wasPressed("up") then
+        S.menu = S.menu > 1 and S.menu - 1 or #BOX_MENU_ROWS
+      elseif input:wasPressed("down") then
+        S.menu = S.menu < #BOX_MENU_ROWS and S.menu + 1 or 1
+      elseif input:wasPressed("a") then
+        g2chooseMenu(self, S)
+      elseif input:wasPressed("b") then
+        S.menu = nil
+      end
+      return
+    end
+
+    local bySlot, list, cap = g2cells(self, S)
+    local rows = math.max(1, math.ceil(cap / SLOT_COLS))
+    -- row 0 is the BOX banner (a row ABOVE the wall); 1..rows are the wall's own
+    if S.row > 0 and S.row > rows then S.row = rows end
+    if S.col > SLOT_COLS - 1 then S.col = SLOT_COLS - 1 end
+
+    if input:wasPressed("up") then
+      -- up off the wall's top row moves onto the BOX banner
+      if S.row > 0 then S.row = S.row - 1 end
+    elseif input:wasPressed("down") then
+      if S.row == 0 then S.row = 1 else S.row = math.min(rows, S.row + 1) end
+    elseif input:wasPressed("left") then
+      if S.row == 0 then
+        -- on the banner LEFT is the previous BOX (PARTY after BOX 1)
+        g2switchArray(self, S, -1, true)
+      else
+        local cell = g2cursorCell(S, cap) - 1
+        if cell < 1 then cell = cap end
+        S.row = math.floor((cell - 1) / SLOT_COLS) + 1
+        S.col = (cell - 1) % SLOT_COLS
+      end
+    elseif input:wasPressed("right") then
+      if S.row == 0 then
+        -- on the banner RIGHT is the next BOX (the PARTY after the last BOX)
+        g2switchArray(self, S, 1, true)
+      else
+        local cell = g2cursorCell(S, cap) + 1
+        if cell > cap then cell = 1 end
+        S.row = math.floor((cell - 1) / SLOT_COLS) + 1
+        S.col = (cell - 1) % SLOT_COLS
+      end
+    elseif input:wasPressed("a") then
+      if S.row == 0 then
+        -- the banner is a box picker, not a cell: A does nothing on it
+      else
+        local cell = g2cursorCell(S, cap)
+        local mon = bySlot[cell]
+        if S.held then
+          if not mon then
+            g2placeHeld(self, S, cell)
+          elseif mon ~= S.held then
+            S.ask = { kind = "swap", target = cell, mon = mon }
+            S.askYes = true
+          end
+        elseif mon then
+          S.menu = 1
+        end
+      end
+    elseif input:wasPressed("b") then
+      if S.held then
+        S.notice = "You can't leave while holding a POKéMON."
+      else
+        S.ask = { kind = "leave" }
+        S.askYes = true
+      end
+    end
+  end
+
   function M.g2DrawBox(self)
     local game, emb = g2begin(self)
     local F, C = Theme.fonts(game), Theme.col
-    local mode = self.mode or "withdraw"
-    local list, total = {}, 1
-    if type(self.list) == "function" then
-      local ok, v = pcall(self.list, self)
-      if ok and type(v) == "table" then list = v end
-    end
-    if type(self.total) == "function" then
-      local ok, v = pcall(self.total, self)
-      if ok and type(v) == "number" then total = v end
-    end
-    local boxIndex = self.boxIndex or 1
-    local title, prompt = "BILL's PC", nil
-    if type(self.title) == "function" then
-      local ok, v = pcall(self.title, self)
-      if ok and type(v) == "string" then title = display(v) end
-    end
-    if type(self.prompt) == "function" then
-      local ok, v = pcall(self.prompt, self)
-      if ok and type(v) == "string" then prompt = display(v) end
-    end
-    local inserting = self.phase == "insert"
-    if inserting then title = title .. "  \xe2\x86\x92" end
+    local S = g2slotState(self)
+    local bySlot, list, cap = g2cells(self, S)
+    local items = {}
+    for i = 1, cap do items[i] = { mon = bySlot[i] } end
+    local onBanner = (S.row == 0)
+    local index = onBanner and 0 or g2cursorCell(S, cap)
+    local selected = bySlot[index]
+    local banner = g2arrayName(self, S.idx)
     local right
-    if mode == "deposit" then
-      right = ("PARTY %d/6"):format(#list)
+    if S.idx == 0 then
+      right = ("%s %d/%d"):format(word("PARTY"), #list, cap)
     else
-      right = ("BOX %d/%d   %d/%d"):format(boxIndex, g2numBoxes(self.save),
-        #list, g2boxCap(self.save))
+      right = ("%s %d/%d   %d/%d"):format(word("BOX"), S.idx, g2numArrays(self), #list, cap)
+    end
+    local caption = "Choose a POKéMON."
+    if S.held then
+      caption = onBanner and "Pick a BOX to move it to."
+        or "Choose a slot to place it in."
+    elseif onBanner then
+      caption = "Pick a BOX."
+    elseif S.ask and S.ask.kind == "leave" then
+      caption = "Cancel box operations?"
     end
     Shell.top(Theme, game, {
-      title = title, right = right,
-      caption = prompt or "Choose a POKéMON.", money = Shell.money(game),
-      embellish = emb,
+      title = "BILL's PC", right = right, caption = caption,
+      money = Shell.money(game), embellish = emb,
     })
-
-    -- the left mon panel: the engine's own front pic at 1:1, then the level,
-    -- gender and name, exactly the four things PCMonInfo prints
-    local mon
-    if type(self.panelMon) == "function" then
-      local ok, v = pcall(self.panelMon, self)
-      if ok then mon = v end
-    end
-    local PW = 186
-    Theme.panel(MARGIN, Shell.CONTENT_Y, PW, 210, { radius = 8, shadow = 5,
-      color = C.panel, border = C.border })
-    local px, py = MARGIN + 10, Shell.CONTENT_Y + 10
-    local pw, ph = PW - 20, 132
-    Theme.set(C.voidDeep, 1)
-    Theme.rect("fill", px, py, pw, ph, 6)
-    if mon then
-      -- The PACK's own front art first (the same art the party roster shows, and
-      -- for an egg the pack's single egg picture): the engine's own pic is the
-      -- fallback, used when g9-battle-sprites is not installed, has no sheet for
-      -- this mon, or is still baking its first frame.  The engine draws its pic
-      -- through the mon's GBC palette; the pack's art is true-colour, which is
-      -- exactly the difference portraits.lua's own draw handles for the roster.
-      local drawn = false
-      if Portraits and type(Portraits.drawFront) == "function" then
-        drawn = Portraits.drawFront(Theme, game, mon, px, py, pw, ph)
-      end
-      if not drawn then
-        local img, trueColor, species = nil, nil, mon.species
-        if mon.isEgg then
-          local gfx = self.menuGfx and self.menuGfx.eggHatch
-          if type(self.image) == "function" and gfx and gfx.egg then
-            local ok, v = pcall(self.image, self, gfx.egg)
-            if ok then img = v end
-          end
-        elseif type(self.picFor) == "function" then
-          local ok, a, b = pcall(self.picFor, self, mon)
-          if ok then img, trueColor = a, b end
-        end
-        g2pic(self, img, trueColor, species, mon.shiny, px, py, pw, ph)
-      end
-    end
-    local ry = Shell.CONTENT_Y + 150
-    if mon then
-      local lv = (mon.level and ("Lv %d"):format(mon.level)) or ""
-      local gender = (mon.gender == "male" and "\xe2\x99\x82")
-        or (mon.gender == "female" and "\xe2\x99\x80") or ""
-      Theme.text(lv .. " " .. gender, MARGIN + 12, ry, F.body, "left",
-        C.gold)
-      Theme.text(Theme.fit(display(monName(mon, game)), F.body, PW - 24),
-        MARGIN + 12, ry + 26, F.body, "left", C.ink)
-    else
-      Theme.text("CANCEL", MARGIN + 12, ry, F.body, "left", C.inkFaint)
-    end
-
-    -- the nickname list (five rows, the engine's own window)
-    local visible = 5
-    local scroll = self.scroll or 0
-    local rows = {}
-    for slot = 1, visible do
-      local i = scroll + slot
-      local m = list[i]
-      if m then
-        local gender = (m.gender == "male" and " \xe2\x99\x82")
-          or (m.gender == "female" and " \xe2\x99\x80") or ""
-        rows[#rows + 1] = {
-          text = display(monName(m, game)),
-          right = m.level and (("Lv%d%s"):format(m.level, gender)) or nil,
-        }
-      elseif inserting then
-        rows[#rows + 1] = { text = "\xe2\x80\xa6", dim = true }
-      elseif i == total then
-        rows[#rows + 1] = { text = "CANCEL", dim = true }
-      else
-        break
-      end
-    end
-    local LX = MARGIN + PW + 12
-    Shell.list(Theme, game, {
-      rows = rows, index = (self.index or 1) - scroll, scroll = 0,
-      maxVisible = visible, more = scroll + visible < total,
-      x = LX, y = Shell.CONTENT_Y, w = W - MARGIN - LX, row = 34,
-      labelPad = 42, rightPad = 18, t = self.__t or 0,
-    })
-
-    if self.phase == "submenu" then
-      local labels = {}
-      local subs = self.submenuRows
-      if type(subs) == "function" then
-        local ok, v = pcall(subs, self)
-        if ok and type(v) == "table" then
-          for i, row in ipairs(v) do labels[i] = display(row) end
-        end
-      end
-      if #labels == 0 then labels = { "MOVE", "STATS", "CANCEL" } end
-      g2wash()
-      g2modal(self, F, C, { title = "WHAT'S UP?", rows = labels,
-        index = self.submenuIndex or 1, w = 300 })
-    elseif self.message then
-      g2wash()
-      g2modal(self, F, C, { lines = g2lines(self.message), w = 420 })
-    end
-
-    -- Each phase names its own keys through the hint chips, and the release key
-    -- is a chip of its own: a notice in the footer's right readout is cut to
-    -- the space the chips leave, which turned "SELECT: RELEASE" into
-    -- "SELECT: RELEA…".
     local hints
-    if mode == "withdraw" then
+    if S.held then
       hints = {
-        { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
-        { key = "SELECT", text = "RELEASE" },
-        { key = "A", text = "OK" },
-        { key = "B", text = "BACK" },
-      }
-    elseif inserting then
-      hints = {
-        { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
         { key = "\xe2\x86\x90\xe2\x86\x92", text = "BOX" },
         { key = "A", text = "PLACE" },
         { key = "B", text = "BACK" },
       }
-    elseif mode == "move" then
-      hints = {
-        { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
-        { key = "\xe2\x86\x90\xe2\x86\x92", text = "BOX" },
-        { key = "A", text = "OK" },
-        { key = "B", text = "BACK" },
-      }
     else
       hints = {
-        { key = "\xe2\x86\x91\xe2\x86\x93", text = "SELECT" },
+        { key = "\xe2\x86\x90\xe2\x86\x92", text = "BOX" },
         { key = "A", text = "OK" },
-        { key = "B", text = "BACK" },
+        { key = "B", text = "CANCEL" },
       }
     end
-    Shell.footer(Theme, game, { hints = hints, gap = 18 })
+    local rows = math.max(1, math.ceil(g2boxCap(game.save) / COLS))
+    drawBoxGrid(self, game, {
+      items = items, index = index, boxLabel = banner,
+      canSwitchBox = true, detail = S.held or selected,
+      held = S.held, bannerCursor = onBanner, hints = hints, gap = 18,
+      rows = rows,
+    })
+    if S.menu then
+      g2wash()
+      g2modal(self, F, C, { title = "WHAT'S UP?", rows = BOX_MENU_ROWS,
+        index = S.menu, w = 300 })
+    elseif S.ask then
+      g2wash()
+      g2modal(self, F, C, { lines = g2askLines(S),
+        yesno = S.askYes and 1 or 2, w = 420 })
+    elseif S.notice then
+      g2wash()
+      g2modal(self, F, C, { lines = g2lines(S.notice), w = 420 })
+    end
     Theme.set(C.white)
+  end
+
+
+  -- The modern box switch: LEFT/RIGHT on the BOX page step the loaded box with
+  -- NO save in between (the CHANGE BOX picker's save prompt is the ritual the
+  -- modern PC drops).  The engine's own walk, BoxMenu:stepBox, is reached on
+  -- the cart only from MOVE's dpad, so LEFT/RIGHT are free on the withdraw and
+  -- deposit pages; where the engine does use them (MOVE, and the insert
+  -- cursor's box step) this stands down and leaves the pair to it.
+  function M.g2StepBox(self)
+    if type(self) ~= "table" then return end
+    if self.phase or self.message or self.messageFrames or self.cryWait then
+      return
+    end
+    if self.mode == "move" then return end
+    if type(self.stepBox) ~= "function" then return end
+    local input = self.game and self.game.input
+    if not (input and type(input.wasPressed) == "function") then return end
+    local dir = 0
+    if input:wasPressed("left") then dir = -1
+    elseif input:wasPressed("right") then dir = 1 end
+    if dir == 0 then return end
+    if not pcall(self.stepBox, self, dir) then return end
+    if type(self.clampIndex) == "function" then pcall(self.clampIndex, self) end
+    -- keep the SAVE's active box in step with the loaded one, so the switch is
+    -- real and not just a preview: the cart only writes wCurBox through the
+    -- CHANGE BOX menu, which is exactly the prompt this page does not show.
+    local save = self.save
+    if save and type(self.boxIndex) == "number" then
+      local okB, B = pcall(require, "src.core.gen2.Boxes")
+      if okB and type(B) == "table" and type(B.setCurrent) == "function" then
+        pcall(B.setCurrent, save, self.boxIndex)
+      end
+    end
   end
 
   -- ================================================================ MAILBOX

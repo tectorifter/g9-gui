@@ -133,6 +133,8 @@
 --   ui_embellishment ON/OFF  -- corner brackets, rules, header emblem, pulse
 --   ui_portraits     sprites/icons -- portrait band art per roster row
 --   ui_pc_row        ON/OFF  -- an extra PC row in the START rail (off)
+--   color_protection ON/OFF  -- keep the native COLORS / COLOR mode off the
+--                                modern pages on both generations (ON)
 --
 -- GEN 2: Gold/Silver/Crystal are ported phase by phase (src/g9-gui/GEN2-PORT.md).
 -- Gold registers its screens under Gen2* ids and paints a widescreen layer
@@ -225,16 +227,60 @@ return function(mod)
     warn("g9-gui: options.lua did not return a schema table")
   end
 
+  -- The rows options.lua declares as a straight ON/OFF boolean choice.  Their
+  -- stored value is "true"/"false" and every reader in this suite compares it
+  -- textually ("~= \"false\"", `on`), so a boot that reports the same row as a
+  -- boolean, a number or the choice's own LABEL ("ON"/"OFF") must still read as
+  -- that same string.  The Android report that flipped g9-Battle-Scene's
+  -- learner row is exactly this -- the platform handed the row back as "ON"
+  -- rather than "on"/"true" -- so the whole suite reads its rows through this
+  -- one normaliser rather than each screen's own exact compare.
+  --
+  -- The rows that are NOT booleans keep their own value spellings ("sprites",
+  -- "icons", the HP guard's "catch"/"log"/"off") and must pass through
+  -- untouched: "off" there is a real mode, not a synonym for "false".  Only a
+  -- boolean or numeric SHAPE is coerced for those, never a string.
+  local BOOLEAN_ROWS = {
+    modern_ui = true,
+    ui_background = true,
+    ui_embellishment = true,
+    ui_pc_row = true,
+    color_protection = true,
+    short_heal_chat = true,
+    translation = true,
+  }
+  local function normalise(key, v)
+    if v == true then return "true" end
+    if v == false then return "false" end
+    if type(v) == "number" then return v ~= 0 and "true" or "false" end
+    if BOOLEAN_ROWS[key] and type(v) == "string" then
+      local s = v:lower()
+      if s == "on" or s == "true" or s == "yes" or s == "1" then return "true" end
+      if s == "off" or s == "false" or s == "no" or s == "0" then return "false" end
+    end
+    return v
+  end
   local function opt(key)
-    return mod.options:get(key)
+    return normalise(key, mod.options:get(key))
   end
 
-  -- choice rows carry their value as a STRING ("true"/"false"/"icons"/
-  -- "sprites"); a nil (row missing) reads as ON so a partial schema cannot
-  -- silently disable the mod.
+  -- A boolean read.  `opt` has already normalised the row, so "true"/"false"
+  -- are the usual cases; the wider spellings are kept as a belt-and-braces
+  -- fallback (a value `normalise` did not recognise, or a row read straight
+  -- from a manager that bypassed it).  A nil (row missing) or an unknown shape
+  -- reads as ON, so a partial schema can never silently disable the mod.
   local function on(key)
     local v = opt(key)
-    return not (v == "false" or v == false)
+    if v == true then return true end
+    if v == false then return false end
+    if type(v) == "number" then return v ~= 0 end
+    if type(v) == "string" then
+      local s = v:lower()
+      if s == "off" or s == "false" or s == "no" or s == "0" or s == "" then
+        return false
+      end
+    end
+    return true
   end
 
   -- Published BEFORE the MODERN UI gate below, because g9-battle-engine reads
@@ -245,6 +291,40 @@ return function(mod)
   mod.exports.shortHealChatEnabled = function()
     return on("short_heal_chat")
   end
+
+  -- ------------------------------------------ modern-content translation
+  -- (see ui/translation.lua.)  The translation-mod generator's output patches
+  -- the game's Gen 1/2 names, but it cannot reach the expanded dex this suite's
+  -- peer national_dex adds -- species 152+, and their moves, items and
+  -- abilities -- so those stay English under a translated game.  This layer
+  -- detects the translation mod, loads the matching modern-content catalog
+  -- (Latin American Spanish ships today) and folds its names into the same
+  -- content registries the translation mod uses, so EVERY consumer (this
+  -- suite, the engine's own battle HUD and Pokedex, national_dex and the battle
+  -- scene) reads a translated name without knowing this ran.
+  --
+  -- Ordering matters twice over: the patches must run BEFORE the content
+  -- freeze (so they merge like any other contribution) and BEFORE
+  -- display_names below, so a form record inherits its base species' translated
+  -- name.  So it is installed HERE, before both, and -- like display_names --
+  -- before the MODERN UI gate: the records are the game's, not one page's.
+  --
+  -- Fail-open at every step (unknown language, missing catalog, absent option):
+  -- the lookup simply returns its input and the screens show English.
+  local Translation = loadSibling("ui/translation.lua")
+  if Translation then
+    Translation = attempt("ui/translation.lua init", Translation, mod,
+      { on = on, opt = opt, info = info })
+  end
+  if type(Translation) == "table"
+      and type(Translation.install) == "function" then
+    attempt("ui/translation.lua install", Translation.install)
+  end
+  -- Published for this suite's screens (ctx.Translation, below) and for peer
+  -- g9 UI mods: `mod.find("g9-gui").exports.translation`.  Other mods use it
+  -- for ability names (no registry) and for the symbol font fallback; see the
+  -- module header.
+  mod.exports.translation = Translation
 
   -- ------------------------------------------------- species display names
   -- Rewrite every alternate form's record `name` to the name the player should
@@ -319,6 +399,18 @@ return function(mod)
     return
   end
 
+  -- Give the shared Theme the full modern-content localizer (ui/translation.lua's
+  -- M.line -- the `ui` lexicon, the engine's own `strings` for a label the ROM
+  -- also carries, then the `messages` / `messageTemplates` sentences) so every
+  -- string the modern screens draw -- footer hints, the header readouts, the
+  -- START captions, the PC/box/storage page, the party-submenu rows peer mods
+  -- append, a notice like "You can't leave while holding a POKéMON." -- localizes
+  -- with the game.  A no-op whenever no translation mod is active or the
+  -- TRANSLATION row is off (M.line falls straight through then).
+  if Translation and type(Translation.line) == "function" then
+    Theme.setLocalizer(function(text) return Translation.line(text) end)
+  end
+
   local ctx = {
     mod = mod,
     gen = gen,
@@ -332,7 +424,26 @@ return function(mod)
     engine = engine,
     ModernStats = engine and engine.exports.ModernStats or nil,
     MoveCategory = engine and engine.exports.MoveCategory or nil,
+    -- The modern-content translation layer (ui/translation.lua): the screens
+    -- read ctx.Translation.ability(name) for ability strings, which -- unlike
+    -- species/move/item names -- have no content registry to patch.
+    Translation = Translation,
   }
+  -- The COLOR PROTECTION toggle (ui/color_protection.lua).  It wraps the
+  -- engine's render.zones seam so a modern page is blitted with the palette
+  -- shader switched off, keeping gen1recomp's COLORS / COLOR option from
+  -- repainting the suite on either generation.  Fail-open: without the hook
+  -- API the screens simply keep their current (already colour-correct in the
+  -- non-mono modes) behaviour; the row defaults ON.
+  local ColorProtection = loadSibling("ui/color_protection.lua")
+  ctx.ColorProtection = ColorProtection
+    and attempt("ui/color_protection.lua init", ColorProtection, mod, ctx) or nil
+  if ctx.ColorProtection then
+    if not ctx.ColorProtection.install() then
+      info("g9-gui: color protection unavailable -- the render.zones hook is "
+        .. "not exposed by this engine")
+    end
+  end
   -- Build the HP sentinel and read its Mod Manager row.  Both fail open: no
   -- guard, or an unreadable option, only means the two menu pages browse
   -- without the net (see ui/hp_guard.lua).
@@ -514,6 +625,97 @@ return function(mod)
   -- peer knows to fall back to the engine's classic screen.
   if install("MoveLearnMenu", "ui/move_learn.lua") then
     mod.exports.moveLearnScreenId = "MoveLearnMenu"
+  end
+
+  -- ------------------------------------------------ the registry refresh
+  -- The engine resolves a screen id through src.ui.Screens, which MEMOISES
+  -- every factory it hands out (`resolve` keeps `cache[id]`, Screens.lua).  A
+  -- mod's registration is NOT in `game.data.screens` while the entry chunks
+  -- run: the loader folds every content registry's ops into the live data
+  -- only AFTER every enabled mod has initialised (src/mods/Registry.lua, and
+  -- the loader's freeze at the end of its pass).  So an id resolved during the
+  -- load phase -- by an earlier-loading mod, or by a boot step whose order
+  -- differs by platform -- memoises the ENGINE's builtin, and that stale entry
+  -- then shadows this suite's record for the whole session: every later push of
+  -- that id (the engine's own START screen, the native battle queue's move
+  -- learner, the bag's TM use, the evolution's learn run) gets the classic
+  -- screen instead of this mod's page.  A desktop boot that resolves nothing
+  -- early works; a boot that does falls back -- exactly the "works fine on PC,
+  -- falls to the native screen on Android" report (the same class of
+  -- platform-shaped routing fault g9-Battle-Scene's FN.pushLearner already
+  -- works around for its in-battle learner, and the reason the move learner is
+  -- the screen a user notices: it is opened mid-battle, far from the menu).
+  --
+  -- The cure is one cache drop AFTER the merge.  `game.ready` fires once every
+  -- service is up and every registry has been folded in (src/core/Game.lua),
+  -- and just before the boot pushes its first screen, so clearing the cache
+  -- there means the next resolve of EVERY id re-reads the live data -- this
+  -- suite's records included -- instead of a builtin memoised too early.
+  -- Dropping the cache is always safe: it holds factories, never state, and
+  -- re-resolving simply re-reads `game.data.screens`.  Fail-open as everywhere
+  -- else: an engine without Screens.invalidate, or a frozen require, leaves the
+  -- cache exactly as it was before this block existed.
+  local function refreshScreens()
+    local ok, Screens = pcall(require, "src.ui.Screens")
+    if not ok or type(Screens) ~= "table"
+        or type(Screens.invalidate) ~= "function" then
+      return false
+    end
+    return pcall(Screens.invalidate)
+  end
+  -- One drop now (harmless before the merge, and correct after a hot reload),
+  -- then the one that matters, after every registry has been folded in.
+  refreshScreens()
+  if mod.events and type(mod.events.on) == "function" then
+    mod.events:on("game.ready", function(payload)
+      refreshScreens()
+      -- One diagnostic line, so a platform whose boot still cannot reach a
+      -- modern screen is visible in the log rather than silent: is the
+      -- learner's record really in the live data after the merge?
+      local game = payload and payload.game
+      local screens = game and game.data and game.data.screens
+      local id = mod.exports.moveLearnScreenId
+      if id and screens then
+        if screens[id] then
+          info(("g9-gui: screen registry refreshed after boot -- modern learner "
+            .. "record '%s' is registered"):format(id))
+        else
+          warn(("g9-gui: screen registry refreshed after boot but the modern "
+            .. "learner record '%s' is MISSING from the live screens data -- "
+            .. "the classic learner will answer"):format(id))
+        end
+      end
+    end)
+  end
+
+  -- ------------------------------------------- the Gold out-of-battle learner
+  -- Gold has no learner SCREEN: every out-of-battle learn -- a TM used from the
+  -- PACK (the party screen picks the mon first), a RARE CANDY's level moves, an
+  -- evolution's new move, the move tutor's -- runs inside Game2:learnMoveOn,
+  -- which draws the exchange as engine TextBoxes plus the native forget list.
+  -- Registering MoveLearnMenu therefore does nothing for those flows on Gold
+  -- (only g9-Battle-Scene's in-battle pause reaches the screen there), which is
+  -- why the modern learner never appeared when a move was learned from the
+  -- party flow.  ui/gold_learner.lua wraps that one entry point and routes the
+  -- four-slots-full case through this suite's registered page, with the
+  -- caller's own onDone threaded through so every continuation still runs.
+  -- Gold only; Gen 1's engine already pushes the screen above.  Fail-open:
+  -- without Game2, or with no mod-owned learner, the engine's own flow stays.
+  if gen == 2 then
+    local GoldLearner = loadSibling("ui/gold_learner.lua")
+    if GoldLearner then
+      GoldLearner = attempt("ui/gold_learner.lua init", GoldLearner, mod, ctx)
+    end
+    if type(GoldLearner) == "table"
+        and type(GoldLearner.install) == "function" then
+      local okG, installedG = pcall(GoldLearner.install)
+      if okG and installedG then
+        installed[#installed + 1] = "gold learner"
+      elseif not okG then
+        warn("g9-gui: the Gold out-of-battle learner could not be installed: "
+          .. tostring(installedG))
+      end
+    end
   end
 
   -- --------------------------------------------------- TRAIN / BLACKLIST skins

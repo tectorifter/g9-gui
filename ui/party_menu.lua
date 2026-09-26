@@ -129,36 +129,87 @@ return function(mod, ctx)
     local F = Theme.fonts(game).body
     local n = #sub_items
     if n == 0 then return end
-    -- rows are 34px: a 15px-ink label needs 15, and the popup stays inside the
-    -- roster band for a six-item field-move list
+    -- rows are 34px: a 15px-ink label needs 15, and ONE column of seven ends
+    -- exactly on the content band (7 * 34 + 16 = 254 = ROSTER_Y..H-40) -- so
+    -- seven is the most that may be stacked before the list reaches the
+    -- footer's hint row.  A longer list WRAPS instead of running under it: the
+    -- columns on screen are the ones the cursor has reached, so pressing DOWN
+    -- off the seventh row grows the popup by a column and lands on the rest of
+    -- the list at the TOP of it (the engine's own subIndex wraps from the last
+    -- option back to the first, STATS).  The rail wraps the same way (see
+    -- ui/shell.lua S.rows), so both lists in this page behave alike.
     local row = 34
-    local h = n * row + 16
-    local w = 240
+    local cap = 7
+    local gap = 8
+    local totalCols = math.max(1, math.ceil(n / cap))
+    local shown = math.ceil((sub_index or 1) / cap)
+    if shown < 1 then shown = 1 end
+    if shown > totalCols then shown = totalCols end
+    local widest = 0
     for _, it in ipairs(sub_items) do
-      local tw = Theme.w(it.label or "", F) + 44
-      if tw > w then w = tw end
+      local tw = Theme.w(it.label or "", F)
+      if tw > widest then widest = tw end
     end
-    local x = Shell.ROSTER_X + Shell.ROSTER_W - w
+    -- A single column keeps the popup's usual chunky width.  Several hug their
+    -- own labels so the whole grid still fits inside the roster band: they take
+    -- the band's full width and tighten the label gutter while a very wide
+    -- option needs the pixels, so no option is ever cut to an ellipsis.
+    local w = 240
+    local pad = 44
+    if shown > 1 then
+      local room = math.floor((Shell.ROSTER_W - (shown - 1) * gap) / shown)
+      if room < 130 then room = 130 end
+      pad = math.max(24, math.min(44, room - widest - 16))
+      w = math.max(150, widest + pad + 16)
+      if w > room then w = room end
+    elseif widest + 56 > w then
+      w = widest + 56
+    end
+    local h = math.min(cap, n) * row + 16
+    local pw = shown * w + (shown - 1) * gap
+    local x = Shell.ROSTER_X + Shell.ROSTER_W - pw
+    -- The popup must clear the footer's hint row: the frame used to be clamped
+    -- to H-40 (320), which is where the hints' key chips and text print, so a
+    -- tall popup's bottom border and its drop shadow ran through them.  Clamp
+    -- instead so the SHADOW (3px below the fill) stops at the footer RULE
+    -- (314) -- the frame then ends exactly on the rule -- and when even that
+    -- does not fit, tighten the panel's own padding rather than slide it up
+    -- past the content band.
+    local bottom = Shell.FOOT_RULE_Y - 3
     local y = rowY
-    if y + h > H - 40 then y = H - 40 - h end
+    if y + h > bottom then y = bottom - h end
     if y < Shell.ROSTER_Y then y = Shell.ROSTER_Y end
+    if y + h > bottom then h = bottom - y end
     -- dim the roster behind the popup so the list reads as modal
     Theme.set(C.black, 0.45)
     Theme.rect("fill", Shell.ROSTER_X - 6, Shell.ROSTER_Y - 8,
       Shell.ROSTER_W + 12, Shell.HEADER_H + 6 * Shell.ROW_H + 12, 6)
-    Theme.panel(x, y, w, h, { radius = 6, shadow = 3 })
-    local ty = y + 8
-    for i, it in ipairs(sub_items) do
-      local selected = i == sub_index
-      if selected then
-        Theme.set(C.rowLit)
-        Theme.rect("fill", x + 5, ty - 5, w - 10, row - 6, 5)
-        Theme.chevrons(x + 12, ty + 3, 18, C.accent,
-          0.5 + 0.5 * math.sin(self.__t * 0.2))
+    Theme.panel(x, y, pw, h, { radius = 6, shadow = 3 })
+    for k = 1, shown do
+      local cx = x + (k - 1) * (w + gap)
+      -- a rule between the columns, so the grid reads as columns and not as
+      -- one very wide list
+      if k > 1 then
+        Theme.set(C.border)
+        Theme.rect("fill", cx - gap * 0.5 - 0.5, y + 10, 1, h - 20, 0)
       end
-      Theme.text(Theme.fit(it.label or "", F, w - 44 - 12), x + 44, ty + 3, F,
-        "left", selected and C.accent or C.inkDim)
-      ty = ty + row
+      local first = (k - 1) * cap + 1
+      local count = math.min(cap, n - first + 1)
+      local ty = y + 8
+      for i = 1, count do
+        local at = first + i - 1
+        local it = sub_items[at]
+        local selected = at == sub_index
+        if selected then
+          Theme.set(C.rowLit)
+          Theme.rect("fill", cx + 5, ty - 5, w - 10, row - 6, 5)
+          Theme.chevrons(cx + 12, ty + 3, 18, C.accent,
+            0.5 + 0.5 * math.sin(self.__t * 0.2))
+        end
+        Theme.text(Theme.fit(it.label or "", F, w - pad - 12), cx + pad, ty + 3, F,
+          "left", selected and C.accent or C.inkDim)
+        ty = ty + row
+      end
     end
   end
 
@@ -181,18 +232,10 @@ return function(mod, ctx)
     if okMsg and type(msg) == "string" then caption = msg:gsub("\n", " ") end
     Shell.top(Theme, game, {
       title = "POK\xc3\xa9MON",
-      right = ("PARTY %d/%d"):format(#party, 6),
+      right = ("%s %d/%d"):format(Shell.ui("PARTY"), #party, 6),
       caption = caption,
       money = Shell.money(game),
       embellish = embellish,
-    })
-
-    -- the START menu's rows, in the same rail the START screen draws; the
-    -- POKeMON row is the section being shown (band, no cursor)
-    Shell.rows(Theme, game, {
-      items = self.__rows,
-      active = self.__partyRow,
-      t = self.__t or 0,
     })
 
     Roster.draw(Theme, game, {
@@ -201,6 +244,22 @@ return function(mod, ctx)
       party = party, index = index, focus = true,
       t = self.__t or 0, mode = opt("ui_portraits"),
       embellish = embellish, logic = self, portraits = Portraits,
+    })
+
+    -- the START menu's rows, in the same rail the START screen draws; the
+    -- POKeMON row is the section being shown (band, no cursor).  A START menu
+    -- long enough to run under the footer wraps into COLUMNS on the START
+    -- screen (ui/shell.lua S.rows), but this page's rail is a STATIC mirror --
+    -- it has no cursor of its own -- and the roster it sits beside starts 8px
+    -- away: a second rail column would land on the first member's portrait and
+    -- read as a rendering bug, not as a menu.  So the mirror shows the
+    -- section's own column only (`cols = 1`); the rows past the eighth stay
+    -- one DOWN away on the START screen, whose rail is the one with a cursor.
+    Shell.rows(Theme, game, {
+      items = self.__rows,
+      active = self.__partyRow,
+      columns = true, cap = 8, cols = 1,
+      t = self.__t or 0,
     })
 
     -- the swap / softboiled source row keeps a hollow marker
@@ -335,15 +394,10 @@ return function(mod, ctx)
 
     Shell.top(Theme, game, {
       title = "POK\xc3\xa9MON",
-      right = ("PARTY %d/%d"):format(#party, 6),
+      right = ("%s %d/%d"):format(Shell.ui("PARTY"), #party, 6),
       caption = g2Prompt(self),
       money = Shell.money(game),
       embellish = embellish,
-    })
-
-    Shell.rows(Theme, game, {
-      items = self.__rows, active = self.__partyRow, t = self.__t or 0,
-      w = 158, labelPad = 32,
     })
 
     Roster.draw(Theme, game, {
@@ -352,6 +406,19 @@ return function(mod, ctx)
       party = party, index = index, focus = true,
       t = self.__t or 0, gen = 2, mode = opt("ui_portraits"),
       embellish = embellish, logic = self, portraits = Portraits,
+    })
+
+    -- the START menu's rows, in the same rail the START screen draws.  Gold's
+    -- START menu carries one more row than Gen 1's (POKeGEAR) and its own list
+    -- already scrolls at eight, so a rail longer than the band is the norm here
+    -- -- it wraps into columns on the START screen (ui/shell.lua S.rows), but
+    -- this page's rail is the same STATIC mirror as the Gen 1 arm above and
+    -- draws only the section's own column (`cols = 1`) for the same reason:
+    -- the roster is 8px away, so a second column would sit on the first
+    -- member's portrait.
+    Shell.rows(Theme, game, {
+      items = self.__rows, active = self.__partyRow, t = self.__t or 0,
+      w = 158, labelPad = 32, columns = true, cap = 8, cols = 1,
     })
 
     -- the switch / softboiled source row keeps a hollow marker
